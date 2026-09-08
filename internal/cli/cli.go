@@ -21,6 +21,7 @@ import (
 	"github.com/EmreErdogan/np/internal/service"
 	"github.com/EmreErdogan/np/internal/store"
 	"github.com/EmreErdogan/np/internal/ts"
+	"github.com/EmreErdogan/np/internal/upgrade"
 )
 
 const usage = `np - share notes across your tailnet
@@ -43,6 +44,7 @@ Sync:
   np daemon              serve, auto-sync with hub, fan out received changes
   np status              local identity, hub, note count
   np version
+  np upgrade [--check]   install the latest release from GitHub
 
 Service (runs "np daemon" in the background at login):
   np service install | uninstall | status
@@ -62,6 +64,13 @@ func Run(args []string) int {
 	}
 	if args[0] == "version" || args[0] == "--version" {
 		fmt.Println("np", Version)
+		return 0
+	}
+	if args[0] == "upgrade" { // works without tailscale
+		if err := cmdUpgrade(args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "np:", err)
+			return 1
+		}
 		return 0
 	}
 	if err := run(args[0], args[1:]); err != nil {
@@ -526,5 +535,42 @@ func cmdStatus(n *proto.Node) error {
 	}
 	fmt.Printf("node:   %s (%s)\nlogin:  %s\ndir:    %s\nhub:    %s\nport:   %d\nnotes:  %d\n",
 		n.Self.Name, n.Self.IP, n.Self.Login, n.Store.Dir, hub, n.Store.Config.Port, len(n.Store.List(false)))
+	return nil
+}
+
+func cmdUpgrade(args []string) error {
+	check := len(args) == 1 && args[0] == "--check"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	rel, err := upgrade.Latest(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("current %s, latest %s\n", Version, rel.Tag)
+	if strings.TrimPrefix(rel.Tag, "v") == strings.TrimPrefix(Version, "v") {
+		fmt.Println("already up to date")
+		return nil
+	}
+	if check {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		return err
+	}
+	if err := upgrade.Install(ctx, rel, exe); err != nil {
+		return err
+	}
+	fmt.Printf("installed %s to %s\n", rel.Tag, exe)
+	restarted, err := service.Restart()
+	if err != nil {
+		return fmt.Errorf("binary upgraded but service restart failed: %w", err)
+	}
+	if restarted {
+		fmt.Println("service restarted")
+	}
 	return nil
 }

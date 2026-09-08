@@ -43,6 +43,23 @@ func Uninstall() error {
 	}
 }
 
+// Restart restarts the service if it is installed; a no-op otherwise.
+func Restart() (bool, error) {
+	switch runtime.GOOS {
+	case "linux":
+		if !fileExists(systemdPath()) {
+			return false, nil
+		}
+		return true, run("systemctl", "--user", "restart", systemdName)
+	case "darwin":
+		if !fileExists(launchdPath()) {
+			return false, nil
+		}
+		return true, run("launchctl", "kickstart", "-k", domain()+"/"+launchdName)
+	}
+	return false, nil
+}
+
 // Status returns a short description of the service state.
 func Status() (string, error) {
 	switch runtime.GOOS {
@@ -149,4 +166,9 @@ func installLaunchd(exe, logPath string) (string, error) {
 		return "", err
 	}
 	return p, nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }

@@ -18,7 +18,9 @@ for linux/darwin, amd64/arm64, or build from source:
 go install github.com/EmreErdogan/np@latest
 ```
 
-Requires a running Tailscale on every machine.
+Requires a running Tailscale on every machine. Later, `np upgrade` fetches
+the newest release, verifies its checksum, replaces itself and restarts the
+service if one is installed.
 
 ## Releasing
 
