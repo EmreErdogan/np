@@ -50,6 +50,9 @@ func TestWebFlow(t *testing.T) {
 	if string(got) != "milk" {
 		t.Fatal(string(got))
 	}
+	if m := n.Store.Get("todo"); m.ModBy != "phone" || m.Clock.String() != "n1:1" {
+		t.Fatalf("web edit should be attributed to the caller, clock to the node: %+v", m)
+	}
 	select {
 	case <-n.Changed:
 	default:
@@ -83,7 +86,7 @@ func TestWebFlow(t *testing.T) {
 	if r := post(t, srv.URL+"/web/delete", `{"name":"todo"}`, true); r.StatusCode != 200 {
 		t.Fatalf("delete: %d", r.StatusCode)
 	}
-	if !n.Store.Get("todo").Deleted {
-		t.Fatal("expected tombstone")
+	if m := n.Store.Get("todo"); !m.Deleted || m.ModBy != "phone" {
+		t.Fatalf("expected tombstone by phone: %+v", m)
 	}
 }

@@ -70,6 +70,7 @@ type Store struct {
 	Node   string
 	Config Config
 	idx    *Index
+	author string // overrides ModBy during scanAs
 }
 
 // ApplyResult describes what Apply did with an incoming note.
@@ -245,6 +246,9 @@ func (s *Store) commit(name string, data []byte, hash string, mt time.Time, dele
 	m.Hash = hash
 	m.ModTime = mt.UTC()
 	m.ModBy = s.Node
+	if s.author != "" {
+		m.ModBy = s.author
+	}
 	m.Deleted = deleted
 	if !deleted {
 		if err := s.writeSnapshot(name, hash, data); err != nil {
@@ -308,8 +312,15 @@ func (s *Store) Path(name string) (string, error) {
 	return p, os.MkdirAll(filepath.Dir(p), 0o755)
 }
 
-// Write replaces the working copy and commits it.
+// Write replaces the working copy and commits it as this node's edit.
 func (s *Store) Write(name string, data []byte) error {
+	return s.WriteBy(name, data, s.Node)
+}
+
+// WriteBy is Write with the edit attributed to another author, e.g. a phone
+// editing through this node's web UI. The vector clock still advances under
+// this node's name; only the displayed author differs.
+func (s *Store) WriteBy(name string, data []byte, by string) error {
 	p, err := s.Path(name)
 	if err != nil {
 		return err
@@ -317,18 +328,29 @@ func (s *Store) Write(name string, data []byte) error {
 	if err := os.WriteFile(p, data, 0o644); err != nil {
 		return err
 	}
-	_, err = s.Scan()
-	return err
+	return s.scanAs(by)
 }
 
 // Delete removes the working copy and records a tombstone.
 func (s *Store) Delete(name string) error {
+	return s.DeleteBy(name, s.Node)
+}
+
+// DeleteBy is Delete attributed to another author (see WriteBy).
+func (s *Store) DeleteBy(name, by string) error {
 	if err := ValidName(name); err != nil {
 		return err
 	}
 	if err := os.Remove(s.notePath(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	return s.scanAs(by)
+}
+
+// scanAs runs Scan with pending changes attributed to by.
+func (s *Store) scanAs(by string) error {
+	s.author = by
+	defer func() { s.author = "" }()
 	_, err := s.Scan()
 	return err
 }

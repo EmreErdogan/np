@@ -99,7 +99,7 @@ func (u *ui) save(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 		http.Error(w, "note changed since you opened it; reload and retry", http.StatusConflict)
 		return
 	}
-	if err := u.n.Store.Write(req.Name, []byte(req.Content)); err != nil {
+	if err := u.n.Store.WriteBy(req.Name, []byte(req.Content), peer.Name); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -120,7 +120,7 @@ func (u *ui) del(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	}
 	u.n.Lock()
 	defer u.n.Unlock()
-	if err := u.n.Store.Delete(req.Name); err != nil {
+	if err := u.n.Store.DeleteBy(req.Name, peer.Name); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
