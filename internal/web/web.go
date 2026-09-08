@@ -22,6 +22,7 @@ func Mount(n *proto.Node) func(mux *http.ServeMux) {
 	w := &ui{n: n}
 	return func(mux *http.ServeMux) {
 		mux.HandleFunc("GET /{$}", n.Auth(w.list))
+		mux.HandleFunc("GET /new", n.Auth(w.create))
 		mux.HandleFunc("GET /n/{name...}", n.Auth(w.note))
 		mux.HandleFunc("POST /web/save", n.Auth(w.save))
 		mux.HandleFunc("POST /web/delete", n.Auth(w.del))
@@ -36,6 +37,11 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	notes := u.n.Store.List(false)
 	u.n.Unlock()
 	render(w, listTmpl, map[string]any{"Node": u.n.Self.Name, "Notes": notes, "Who": peer.Name})
+}
+
+// create renders an empty editor; the name is chosen on save.
+func (u *ui) create(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
+	render(w, noteTmpl, map[string]any{"Node": u.n.Self.Name, "Name": "", "Content": "", "Hash": "", "New": true, "Edit": true})
 }
 
 func (u *ui) note(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
@@ -94,6 +100,10 @@ func (u *ui) save(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	curHash := ""
 	if cur != nil && !cur.Deleted {
 		curHash = cur.Hash
+	}
+	if req.Base == "" && curHash != "" {
+		http.Error(w, "a note named "+req.Name+" already exists", http.StatusConflict)
+		return
 	}
 	if curHash != req.Base {
 		http.Error(w, "note changed since you opened it; reload and retry", http.StatusConflict)
@@ -157,18 +167,18 @@ textarea{min-height:60vh;font-family:ui-monospace,Menlo,monospace;font-size:15px
 
 var listTmpl = template.Must(template.New("list").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>np · {{.Node}}</title><style>` + css + `</style><main>
-<header><h1>np</h1><small>{{.Node}} · you: {{.Who}}</small><span class=sp></span><a class=btn href="/n/new-note?edit">New</a></header>
+<header><h1>np</h1><small>{{.Node}} · you: {{.Who}}</small><span class=sp></span><a class=btn href="/new">New</a></header>
 <input id=q placeholder="filter" autofocus oninput="f()">
 <ul id=l>{{range .Notes}}<li><a href="/n/{{.Name}}"><span>{{.Name}}</span><small>{{.ModBy}} · {{.ModTime.Local.Format "Jan 2 15:04"}}</small></a></li>{{else}}<li class=empty>no notes yet</li>{{end}}</ul>
 <script>function f(){var q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#l li').forEach(function(li){li.style.display=li.textContent.toLowerCase().includes(q)?'':'none'})}</script>
 </main>`))
 
 var noteTmpl = template.Must(template.New("note").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>{{.Name}} · np</title><style>` + css + `</style><main>
+<title>{{if .New}}new{{else}}{{.Name}}{{end}} · np</title><style>` + css + `</style><main>
 <header><h1><a href="/">np</a></h1><small>{{.Node}}</small><span class=sp></span>
 {{if not .Edit}}<a class=btn href="?edit">Edit</a>{{end}}</header>
 {{if .Edit}}
-<input id=name value="{{.Name}}" {{if not .New}}readonly{{end}} placeholder="note name">
+<input id=name value="{{.Name}}" {{if not .New}}readonly{{else}}autofocus{{end}} placeholder="note name">
 <div class=row></div>
 <textarea id=c>{{.Content}}</textarea>
 <div class=row><button class=pri onclick="save()">Save</button>{{if not .New}}<a class=btn href="/n/{{.Name}}">Cancel</a><span class=sp></span><button class=danger onclick="del()">Delete</button>{{end}}</div>

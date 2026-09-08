@@ -58,8 +58,12 @@ func TestWebFlow(t *testing.T) {
 	default:
 		t.Fatal("save should signal Changed")
 	}
-	// List and note pages render.
-	for _, path := range []string{"/", "/n/todo", "/n/todo?edit"} {
+	// Creating under an existing name is refused with a clear message.
+	if r := post(t, srv.URL+"/web/save", `{"name":"todo","content":"x","base":""}`, true); r.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate create: %d", r.StatusCode)
+	}
+	// List, new and note pages render.
+	for _, path := range []string{"/", "/new", "/n/todo", "/n/todo?edit"} {
 		resp, err := http.Get(srv.URL + path)
 		if err != nil || resp.StatusCode != 200 {
 			t.Fatalf("%s: %v %d", path, err, resp.StatusCode)
