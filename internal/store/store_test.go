@@ -113,6 +113,10 @@ func TestApplyConflictKeepsLoser(t *testing.T) {
 	if string(loser) != "from a" {
 		t.Fatalf("loser=%q", loser)
 	}
+	// The merge is one history entry (base, a's edit, merged), not two.
+	if h := a.Get("n").History; len(h) != 3 || h[2].Clock.String() != "a:3,b:1" {
+		t.Fatalf("history=%+v", h)
+	}
 	// Merged version must dominate b's so it flows back.
 	if clock.Compare(a.Get("n").Clock, b.Get("n").Clock) != clock.Dominates {
 		t.Fatal("merged clock should dominate")

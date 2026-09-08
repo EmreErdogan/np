@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/emre/np/internal/proto"
+	"github.com/emre/np/internal/service"
 	"github.com/emre/np/internal/store"
 	"github.com/emre/np/internal/ts"
 )
@@ -36,9 +38,13 @@ Sync:
   np peers               tailnet machines and whether they run np
   np hub [<peer>|none]   show or set the default sync peer
   np sync [<peer>]       sync with hub (or the given peer)
+  np sync --all          sync with every online peer running np
   np serve               accept syncs from peers (foreground)
-  np daemon              serve + auto-sync with hub every interval
+  np daemon              serve, auto-sync with hub, fan out received changes
   np status              local identity, hub, note count
+
+Service (runs "np daemon" in the background at login):
+  np service install | uninstall | status
 
 Notes live in ~/.np/notes as plain markdown (override with NP_DIR).
 Any editor works; np records external edits on the next command.
@@ -90,6 +96,8 @@ func run(cmd string, args []string) error {
 		return cmdDaemon(ctx, n)
 	case "status":
 		return cmdStatus(n)
+	case "service":
+		return cmdService(n, args)
 	default:
 		return fmt.Errorf("unknown command %q (try `np help`)", cmd)
 	}
@@ -345,6 +353,19 @@ func targetPeer(ctx context.Context, n *proto.Node, args []string) (ts.Peer, err
 }
 
 func cmdSync(ctx context.Context, n *proto.Node, args []string) error {
+	if len(args) == 1 && (args[0] == "--all" || args[0] == "-a") {
+		reps, err := n.SyncAll(ctx)
+		if err != nil {
+			return err
+		}
+		if len(reps) == 0 {
+			fmt.Println("no online peers running np")
+		}
+		for _, rep := range reps {
+			printReport(rep)
+		}
+		return nil
+	}
 	p, err := targetPeer(ctx, n, args)
 	if err != nil {
 		return err
@@ -373,13 +394,21 @@ func printReport(rep proto.SyncReport) {
 	}
 }
 
+// cmdDaemon serves, syncs with the hub on every tick, and, whenever a peer
+// pushes a change to us, fans it out to every other online np peer after a
+// short debounce. On the hub that turns one machine's push into everyone's
+// pull; on a leaf it just keeps the mesh converged faster.
 func cmdDaemon(ctx context.Context, n *proto.Node) error {
+	n.Changed = make(chan struct{}, 1)
 	errc := make(chan error, 1)
 	go func() { errc <- n.Serve(ctx) }()
 	interval := time.Duration(n.Store.Config.Interval) * time.Second
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
-	syncOnce := func() {
+	const debounce = 2 * time.Second
+	var fanout <-chan time.Time
+
+	scan := func() {
 		n.Lock()
 		changed, err := n.Store.Scan()
 		n.Unlock()
@@ -389,6 +418,8 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 		for _, c := range changed {
 			n.Log.Println("local change:", c)
 		}
+	}
+	syncHub := func() {
 		if n.Store.Config.Hub == "" {
 			return
 		}
@@ -406,7 +437,21 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 			n.Log.Println("sync", rep.String())
 		}
 	}
-	syncOnce()
+	syncAll := func() {
+		reps, err := n.SyncAll(ctx)
+		if err != nil {
+			n.Log.Println("fan-out:", err)
+			return
+		}
+		for _, rep := range reps {
+			if len(rep.Pulled)+len(rep.Pushed)+len(rep.Errors) > 0 {
+				n.Log.Println("fan-out", rep.String())
+			}
+		}
+	}
+
+	scan()
+	syncHub()
 	for {
 		select {
 		case <-ctx.Done():
@@ -414,8 +459,53 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 		case err := <-errc:
 			return err
 		case <-tick.C:
-			syncOnce()
+			scan()
+			syncHub()
+		case <-n.Changed:
+			if fanout == nil {
+				fanout = time.After(debounce)
+			}
+		case <-fanout:
+			fanout = nil
+			syncAll()
 		}
+	}
+}
+
+func cmdService(n *proto.Node, args []string) error {
+	sub, err := oneArg(args, "install | uninstall | status")
+	if err != nil {
+		return err
+	}
+	switch sub {
+	case "install":
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if exe, err = filepath.EvalSymlinks(exe); err != nil {
+			return err
+		}
+		p, err := service.Install(exe, filepath.Join(n.Store.Dir, "daemon.log"))
+		if err != nil {
+			return err
+		}
+		fmt.Printf("installed %s\nrunning: %s daemon\n", p, exe)
+		if _, err := os.Stat("/run/systemd/system"); err == nil {
+			fmt.Println("tip: `loginctl enable-linger` keeps it running when you are logged out")
+		}
+		return nil
+	case "uninstall":
+		return service.Uninstall()
+	case "status":
+		st, err := service.Status()
+		if err != nil {
+			return err
+		}
+		fmt.Println(st)
+		return nil
+	default:
+		return fmt.Errorf("unknown service command %q", sub)
 	}
 }
 

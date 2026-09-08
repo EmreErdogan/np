@@ -383,9 +383,15 @@ func (s *Store) Apply(remote Meta, content []byte) (ApplyResult, error) {
 		}
 	}
 	// Bump so the merged version dominates both inputs and propagates everywhere.
+	// The merge is recorded as a single history entry: if install just appended
+	// the remote version, rewrite that entry's clock instead of adding another.
 	m := s.idx.Notes[name]
 	m.Clock = merged.Bump(s.Node)
-	m.History = append(m.History, Version{Seq: len(m.History) + 1, Hash: m.Hash, ModTime: m.ModTime, ModBy: m.ModBy, Clock: m.Clock.Copy(), Deleted: m.Deleted})
+	if remoteWins {
+		m.History[len(m.History)-1].Clock = m.Clock.Copy()
+	} else {
+		m.History = append(m.History, Version{Seq: len(m.History) + 1, Hash: m.Hash, ModTime: m.ModTime, ModBy: m.ModBy, Clock: m.Clock.Copy(), Deleted: m.Deleted})
+	}
 	if loserData != nil {
 		p, err := s.Path(loserName)
 		if err != nil {

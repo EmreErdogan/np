@@ -53,6 +53,20 @@ type Node struct {
 	Log   *log.Logger
 	// WhoIs identifies callers; defaults to ts.WhoIs. Tests override it.
 	WhoIs func(ctx context.Context, remoteAddr string) (ts.Peer, error)
+	// Changed receives a signal whenever a peer pushes a change to us, so a
+	// daemon can fan the change out to other peers.
+	Changed chan struct{}
+}
+
+// NotifyChanged signals Changed without blocking.
+func (n *Node) NotifyChanged() {
+	if n.Changed == nil {
+		return
+	}
+	select {
+	case n.Changed <- struct{}{}:
+	default:
+	}
 }
 
 func (n *Node) Lock()   { n.mu.Lock() }
@@ -150,6 +164,9 @@ func (n *Node) Handler() http.Handler {
 			return
 		}
 		n.logf("%s pushed %s: %s", peer.Name, note.Meta.Name, res)
+		if res == store.Accepted || res == store.Conflicted {
+			n.NotifyChanged()
+		}
 		writeJSON(w, Apply{Result: res})
 	}))
 	return mux
@@ -350,4 +367,46 @@ func (n *Node) Sync(ctx context.Context, p ts.Peer) (SyncReport, error) {
 		}
 	}
 	return rep, nil
+}
+
+// SyncAll syncs with every online peer that answers np's ping, in parallel.
+// Peers are pinged concurrently; syncs run one at a time because the store
+// lock serialises them anyway.
+func (n *Node) SyncAll(ctx context.Context) ([]SyncReport, error) {
+	peers, err := ts.Peers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	type probe struct {
+		p  ts.Peer
+		ok bool
+	}
+	results := make([]probe, len(peers))
+	done := make(chan struct{}, len(peers))
+	for i, p := range peers {
+		results[i].p = p
+		go func(i int, p ts.Peer) {
+			defer func() { done <- struct{}{} }()
+			if p.Self || !p.Online {
+				return
+			}
+			_, err := n.PingPeer(ctx, p)
+			results[i].ok = err == nil
+		}(i, p)
+	}
+	for range peers {
+		<-done
+	}
+	var reps []SyncReport
+	for _, r := range results {
+		if !r.ok {
+			continue
+		}
+		rep, err := n.Sync(ctx, r.p)
+		if err != nil {
+			rep = SyncReport{Peer: r.p.Name, Errors: []string{err.Error()}}
+		}
+		reps = append(reps, rep)
+	}
+	return reps, nil
 }

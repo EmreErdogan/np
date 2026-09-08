@@ -33,8 +33,15 @@ np peers                    # who is on the tailnet and who runs np
 np hub laptop               # default sync target
 np sync                     # sync with hub
 np sync desktop              # or with any peer directly
+np sync --all               # every online peer that runs np
 np daemon                   # serve + auto-sync every 15s (run on the hub too)
+np service install          # run the daemon at login (systemd user / launchd)
 ```
+
+Run the daemon (or the service) on every machine. A machine that receives a
+push fans it out to all other online np peers after a 2s debounce, so with a
+hub every edit reaches every machine within a few seconds; without one, the
+mesh still converges through the periodic hub-less syncs and `sync --all`.
 
 Notes are markdown files in `~/.np/notes/` (override with `NP_DIR`). Edit
 them with anything; np notices external changes on the next command.
