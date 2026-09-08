@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 	"github.com/EmreErdogan/np/internal/store"
 	"github.com/EmreErdogan/np/internal/ts"
 	"github.com/EmreErdogan/np/internal/upgrade"
+	"github.com/EmreErdogan/np/internal/web"
 )
 
 const usage = `np - share notes across your tailnet
@@ -41,11 +43,14 @@ Sync:
   np hub [<peer>|none]   show or set the default sync peer
   np sync [<peer>]       sync with hub (or the given peer)
   np sync --all          sync with every online peer running np
-  np serve               accept syncs from peers (foreground)
+  np serve               accept syncs and serve the web UI (foreground)
   np daemon              serve, auto-sync with hub (or all peers), fan out changes
   np status              local identity, hub, note count
   np version
   np upgrade [--check]   install the latest release from GitHub
+
+The daemon also serves a phone-friendly web UI at http://<tailscale-ip>:7373/
+for reading and editing notes from any device on the tailnet.
 
 Service (runs "np daemon" in the background at login):
   np service install | uninstall | status
@@ -136,7 +141,9 @@ func openNode(ctx context.Context) (*proto.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &proto.Node{Store: s, Self: self, Log: log.New(os.Stderr, "", log.Ltime)}, nil
+	n := &proto.Node{Store: s, Self: self, Log: log.New(os.Stderr, "", log.Ltime)}
+	n.Mount = []func(*http.ServeMux){web.Mount(n)}
+	return n, nil
 }
 
 func oneArg(args []string, what string) (string, error) {
@@ -624,8 +631,8 @@ func cmdStatus(ctx context.Context, n *proto.Node) error {
 	if hub == "" {
 		hub = "(none)"
 	}
-	fmt.Printf("node:   %s (%s)\nlogin:  %s\ndir:    %s\nhub:    %s\nport:   %d\nnotes:  %d\n",
-		n.Self.Name, n.Self.IP, n.Self.Login, n.Store.Dir, hub, n.Store.Config.Port, len(n.Store.List(false)))
+	fmt.Printf("node:   %s (%s)\nlogin:  %s\ndir:    %s\nhub:    %s\nweb:    http://%s:%d/\nnotes:  %d\n",
+		n.Self.Name, n.Self.IP, n.Self.Login, n.Store.Dir, hub, n.Self.IP, n.Store.Config.Port, len(n.Store.List(false)))
 	states, reason := hubStates(ctx, n)
 	if states == nil {
 		fmt.Printf("sync:   %s\n", reason)

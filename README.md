@@ -62,6 +62,14 @@ converges too.
 Notes are markdown files in `~/.np/notes/` (override with `NP_DIR`). Edit
 them with anything; np notices external changes on the next command.
 
+## Web UI
+
+The daemon serves a small phone-friendly page at `http://<tailscale-ip>:7373/`
+(the URL is shown by `np status`). Open it from any device on the tailnet,
+such as a phone running Tailscale, to read, edit, create and delete notes.
+Edits are committed like local edits and fanned out to peers immediately.
+Access uses the same tailnet identity rules as sync.
+
 ## How sync works
 
 - Each note carries a vector clock (`server:3,laptop:1`). Sync compares clocks:

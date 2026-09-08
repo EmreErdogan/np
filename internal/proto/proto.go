@@ -56,6 +56,8 @@ type Node struct {
 	// Changed receives a signal whenever a peer pushes a change to us, so a
 	// daemon can fan the change out to other peers.
 	Changed chan struct{}
+	// Mount registers extra routes (the web UI) on the served mux.
+	Mount []func(mux *http.ServeMux)
 }
 
 // NotifyChanged signals Changed without blocking.
@@ -71,6 +73,9 @@ func (n *Node) NotifyChanged() {
 
 func (n *Node) Lock()   { n.mu.Lock() }
 func (n *Node) Unlock() { n.mu.Unlock() }
+
+// Logf logs through the node's logger when one is set.
+func (n *Node) Logf(format string, a ...any) { n.logf(format, a...) }
 
 func (n *Node) logf(format string, a ...any) {
 	if n.Log != nil {
@@ -92,7 +97,9 @@ func (n *Node) allowed(p ts.Peer) bool {
 	return false
 }
 
-func (n *Node) auth(next func(w http.ResponseWriter, r *http.Request, peer ts.Peer)) http.HandlerFunc {
+// Auth wraps a handler so it only runs for callers the tailnet identifies
+// as allowed; the identified peer is passed along.
+func (n *Node) Auth(next func(w http.ResponseWriter, r *http.Request, peer ts.Peer)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
@@ -122,12 +129,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 // Handler returns the HTTP API.
 func (n *Node) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /np/v1/ping", n.auth(func(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
+	mux.HandleFunc("GET /np/v1/ping", n.Auth(func(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
 		n.Lock()
 		defer n.Unlock()
 		writeJSON(w, Ping{Node: n.Self.Name, Version: Version, Notes: len(n.Store.List(false))})
 	}))
-	mux.HandleFunc("GET /np/v1/index", n.auth(func(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
+	mux.HandleFunc("GET /np/v1/index", n.Auth(func(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
 		n.Lock()
 		defer n.Unlock()
 		if _, err := n.Store.Scan(); err != nil {
@@ -136,7 +143,7 @@ func (n *Node) Handler() http.Handler {
 		}
 		writeJSON(w, n.index())
 	}))
-	mux.HandleFunc("GET /np/v1/notes/{name...}", n.auth(func(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
+	mux.HandleFunc("GET /np/v1/notes/{name...}", n.Auth(func(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
 		n.Lock()
 		defer n.Unlock()
 		note, err := n.load(r.PathValue("name"))
@@ -146,7 +153,7 @@ func (n *Node) Handler() http.Handler {
 		}
 		writeJSON(w, note)
 	}))
-	mux.HandleFunc("PUT /np/v1/notes/{name...}", n.auth(func(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
+	mux.HandleFunc("PUT /np/v1/notes/{name...}", n.Auth(func(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 		var note Note
 		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<20)).Decode(&note); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -169,6 +176,9 @@ func (n *Node) Handler() http.Handler {
 		}
 		writeJSON(w, Apply{Result: res})
 	}))
+	for _, m := range n.Mount {
+		m(mux)
+	}
 	return mux
 }
 
