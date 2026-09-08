@@ -291,6 +291,21 @@ func (r SyncReport) String() string {
 	return s
 }
 
+// Detail is String plus the note names, for logs.
+func (r SyncReport) Detail() string {
+	s := r.String()
+	if len(r.Pulled) > 0 {
+		s += " <- " + strings.Join(r.Pulled, ",")
+	}
+	if len(r.Pushed) > 0 {
+		s += " -> " + strings.Join(r.Pushed, ",")
+	}
+	for _, e := range r.Errors {
+		s += "; " + e
+	}
+	return s
+}
+
 // Sync exchanges notes with a peer in both directions. Phase 1 pulls every
 // note where the peer is ahead or concurrent (merging conflicts locally);
 // phase 2 pushes every note where we are ahead, including merge results.

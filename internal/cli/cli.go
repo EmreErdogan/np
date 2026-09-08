@@ -434,7 +434,7 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 			return
 		}
 		if len(rep.Pulled)+len(rep.Pushed)+len(rep.Errors) > 0 {
-			n.Log.Println("sync", rep.String())
+			n.Log.Println("sync", rep.Detail())
 		}
 	}
 	syncAll := func() {
@@ -445,7 +445,7 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 		}
 		for _, rep := range reps {
 			if len(rep.Pulled)+len(rep.Pushed)+len(rep.Errors) > 0 {
-				n.Log.Println("fan-out", rep.String())
+				n.Log.Println("fan-out", rep.Detail())
 			}
 		}
 	}
