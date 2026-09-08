@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/EmreErdogan/np/internal/clock"
 	"github.com/EmreErdogan/np/internal/store"
 	"github.com/EmreErdogan/np/internal/ts"
 )
@@ -120,4 +121,32 @@ func TestSyncDeniesOtherLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = strconv.Itoa
+}
+
+func TestCompareStates(t *testing.T) {
+	local := []*store.Meta{
+		{Name: "same", Clock: clock.Clock{"a": 1}},
+		{Name: "ahead", Clock: clock.Clock{"a": 2}},
+		{Name: "behind", Clock: clock.Clock{"a": 1}},
+		{Name: "div", Clock: clock.Clock{"a": 2}},
+		{Name: "new", Clock: clock.Clock{"a": 1}},
+	}
+	remote := map[string]store.Meta{
+		"same":   {Clock: clock.Clock{"a": 1}},
+		"ahead":  {Clock: clock.Clock{"a": 1}},
+		"behind": {Clock: clock.Clock{"a": 1, "b": 1}},
+		"div":    {Clock: clock.Clock{"a": 1, "b": 1}},
+		"remote": {Clock: clock.Clock{"b": 1}},
+		"gone":   {Clock: clock.Clock{"b": 1}, Deleted: true},
+	}
+	got := Compare(local, remote)
+	want := map[string]SyncState{"same": Synced, "ahead": Ahead, "behind": Behind, "div": Diverged, "new": New, "remote": Behind}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: got %s want %s", k, got[k], v)
+		}
+	}
 }

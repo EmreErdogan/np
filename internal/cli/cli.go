@@ -29,8 +29,9 @@ const usage = `np - share notes across your tailnet
 Notes:
   np new <name>          create a note in $EDITOR (or from stdin)
   np edit <name>         edit a note
-  np ls                  list notes
+  np ls [--local]        list notes with sync state against the hub
   np cat <name>          print a note
+  np search <text>       find notes whose name or content contains text
   np rm <name>           delete a note (tombstone syncs to peers)
   np log <name>          version history
   np show <name> <seq>   print a historical version
@@ -41,7 +42,7 @@ Sync:
   np sync [<peer>]       sync with hub (or the given peer)
   np sync --all          sync with every online peer running np
   np serve               accept syncs from peers (foreground)
-  np daemon              serve, auto-sync with hub, fan out received changes
+  np daemon              serve, auto-sync with hub (or all peers), fan out changes
   np status              local identity, hub, note count
   np version
   np upgrade [--check]   install the latest release from GitHub
@@ -92,7 +93,9 @@ func run(cmd string, args []string) error {
 	case "new", "edit":
 		return cmdEdit(n, args, cmd == "new")
 	case "ls", "list":
-		return cmdList(n)
+		return cmdList(ctx, n, args)
+	case "search", "grep":
+		return cmdSearch(n, args)
 	case "cat":
 		return cmdCat(n, args)
 	case "rm", "delete":
@@ -112,7 +115,7 @@ func run(cmd string, args []string) error {
 	case "daemon":
 		return cmdDaemon(ctx, n)
 	case "status":
-		return cmdStatus(n)
+		return cmdStatus(ctx, n)
 	case "service":
 		return cmdService(n, args)
 	default:
@@ -198,15 +201,92 @@ func cmdEdit(n *proto.Node, args []string, create bool) error {
 	return nil
 }
 
-func cmdList(n *proto.Node) error {
+// hubStates fetches the hub's index and classifies local notes against it.
+// Returns nil (and a reason) when there is no hub or it cannot be reached.
+func hubStates(ctx context.Context, n *proto.Node) (map[string]proto.SyncState, string) {
+	if n.Store.Config.Hub == "" {
+		return nil, "no hub set"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	p, err := targetPeer(ctx, n, nil)
+	if err != nil {
+		return nil, err.Error()
+	}
+	remote, err := n.RemoteIndex(ctx, p)
+	if err != nil {
+		return nil, fmt.Sprintf("hub %s unreachable", p.Name)
+	}
+	return proto.Compare(n.Store.List(true), remote), ""
+}
+
+func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 	if _, err := n.Store.Scan(); err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	for _, m := range n.Store.List(false) {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", m.Name, m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy)
+	var states map[string]proto.SyncState
+	reason := "skipped"
+	if !(len(args) == 1 && args[0] == "--local") {
+		states, reason = hubStates(ctx, n)
 	}
-	return tw.Flush()
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	listed := map[string]bool{}
+	for _, m := range n.Store.List(false) {
+		listed[m.Name] = true
+		st := ""
+		if states != nil {
+			st = string(states[m.Name])
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", m.Name, m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy, st)
+	}
+	for name, st := range states { // notes only the hub has
+		if !listed[name] && st == proto.Behind {
+			fmt.Fprintf(tw, "%s\t\t\t%s (hub only)\n", name, st)
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if states == nil && reason != "skipped" {
+		fmt.Fprintln(os.Stderr, "sync state unavailable:", reason)
+	}
+	return nil
+}
+
+func cmdSearch(n *proto.Node, args []string) error {
+	if len(args) == 0 {
+		return errors.New("expected <text>")
+	}
+	needle := strings.ToLower(strings.Join(args, " "))
+	if _, err := n.Store.Scan(); err != nil {
+		return err
+	}
+	found := 0
+	for _, m := range n.Store.List(false) {
+		data, err := n.Store.Read(m.Name)
+		if err != nil {
+			return err
+		}
+		nameHit := strings.Contains(strings.ToLower(m.Name), needle)
+		var hits []string
+		for i, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(strings.ToLower(line), needle) {
+				hits = append(hits, fmt.Sprintf("  %d: %s", i+1, strings.TrimSpace(line)))
+			}
+		}
+		if !nameHit && len(hits) == 0 {
+			continue
+		}
+		found++
+		fmt.Println(m.Name)
+		for _, h := range hits {
+			fmt.Println(h)
+		}
+	}
+	if found == 0 {
+		fmt.Fprintln(os.Stderr, "no matches")
+	}
+	return nil
 }
 
 func cmdCat(n *proto.Node, args []string) error {
@@ -454,22 +534,33 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 			n.Log.Println("sync", rep.Detail())
 		}
 	}
-	syncAll := func() {
+	// syncAll syncs with every online np peer. Fan-outs log everything;
+	// the periodic hub-less mesh sync logs only when something moved.
+	syncAll := func(label string, verbose bool) {
 		reps, err := n.SyncAll(ctx)
 		if err != nil {
-			n.Log.Println("fan-out:", err)
+			n.Log.Println(label+":", err)
 			return
 		}
-		if len(reps) == 0 {
-			n.Log.Println("fan-out: no other online np peers")
+		if len(reps) == 0 && verbose {
+			n.Log.Println(label + ": no other online np peers")
 		}
 		for _, rep := range reps {
-			n.Log.Println("fan-out", rep.Detail())
+			if verbose || len(rep.Pulled)+len(rep.Pushed)+len(rep.Errors) > 0 {
+				n.Log.Println(label, rep.Detail())
+			}
+		}
+	}
+	periodic := func() {
+		if n.Store.Config.Hub != "" {
+			syncHub()
+		} else {
+			syncAll("mesh", false)
 		}
 	}
 
 	scan()
-	syncHub()
+	periodic()
 	for {
 		select {
 		case <-ctx.Done():
@@ -478,14 +569,14 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 			return err
 		case <-tick.C:
 			scan()
-			syncHub()
+			periodic()
 		case <-n.Changed:
 			if fanout == nil {
 				fanout = time.After(debounce)
 			}
 		case <-fanout:
 			fanout = nil
-			syncAll()
+			syncAll("fan-out", true)
 		}
 	}
 }
@@ -527,7 +618,7 @@ func cmdService(n *proto.Node, args []string) error {
 	}
 }
 
-func cmdStatus(n *proto.Node) error {
+func cmdStatus(ctx context.Context, n *proto.Node) error {
 	n.Store.Scan()
 	hub := n.Store.Config.Hub
 	if hub == "" {
@@ -535,6 +626,17 @@ func cmdStatus(n *proto.Node) error {
 	}
 	fmt.Printf("node:   %s (%s)\nlogin:  %s\ndir:    %s\nhub:    %s\nport:   %d\nnotes:  %d\n",
 		n.Self.Name, n.Self.IP, n.Self.Login, n.Store.Dir, hub, n.Store.Config.Port, len(n.Store.List(false)))
+	states, reason := hubStates(ctx, n)
+	if states == nil {
+		fmt.Printf("sync:   %s\n", reason)
+		return nil
+	}
+	counts := map[proto.SyncState]int{}
+	for _, st := range states {
+		counts[st]++
+	}
+	fmt.Printf("sync:   %d synced, %d ahead, %d new, %d behind, %d conflict\n",
+		counts[proto.Synced], counts[proto.Ahead], counts[proto.New], counts[proto.Behind], counts[proto.Diverged])
 	return nil
 }
 

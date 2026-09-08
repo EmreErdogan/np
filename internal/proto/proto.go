@@ -312,13 +312,9 @@ func (r SyncReport) Detail() string {
 func (n *Node) Sync(ctx context.Context, p ts.Peer) (SyncReport, error) {
 	rep := SyncReport{Peer: p.Name}
 	base := n.base(p)
-	var remote []store.Meta
-	if err := do(ctx, http.MethodGet, base+"/index", nil, &remote); err != nil {
-		return rep, fmt.Errorf("fetch index from %s: %w", p.Name, err)
-	}
-	remoteBy := make(map[string]store.Meta, len(remote))
-	for _, m := range remote {
-		remoteBy[m.Name] = m
+	remoteBy, err := n.RemoteIndex(ctx, p)
+	if err != nil {
+		return rep, err
 	}
 
 	n.Lock()
@@ -424,4 +420,59 @@ func (n *Node) SyncAll(ctx context.Context) ([]SyncReport, error) {
 		reps = append(reps, rep)
 	}
 	return reps, nil
+}
+
+// RemoteIndex fetches a peer's note index keyed by name.
+func (n *Node) RemoteIndex(ctx context.Context, p ts.Peer) (map[string]store.Meta, error) {
+	var remote []store.Meta
+	if err := do(ctx, http.MethodGet, n.base(p)+"/index", nil, &remote); err != nil {
+		return nil, fmt.Errorf("fetch index from %s: %w", p.Name, err)
+	}
+	out := make(map[string]store.Meta, len(remote))
+	for _, m := range remote {
+		out[m.Name] = m
+	}
+	return out, nil
+}
+
+// SyncState describes how a local note relates to a peer's copy.
+type SyncState string
+
+const (
+	Synced   SyncState = "synced"
+	Ahead    SyncState = "ahead"    // local has changes the peer lacks
+	Behind   SyncState = "behind"   // peer has changes we lack
+	Diverged SyncState = "conflict" // both changed; next sync will merge
+	New      SyncState = "new"      // peer has never seen this note
+)
+
+// Compare classifies every local note against a peer index. Notes that
+// exist only on the peer are returned under their name as Behind.
+func Compare(local []*store.Meta, remote map[string]store.Meta) map[string]SyncState {
+	out := make(map[string]SyncState, len(local))
+	seen := map[string]bool{}
+	for _, lm := range local {
+		seen[lm.Name] = true
+		rm, ok := remote[lm.Name]
+		if !ok {
+			out[lm.Name] = New
+			continue
+		}
+		switch clock.Compare(lm.Clock, rm.Clock) {
+		case clock.Equal:
+			out[lm.Name] = Synced
+		case clock.Dominates:
+			out[lm.Name] = Ahead
+		case clock.Dominated:
+			out[lm.Name] = Behind
+		default:
+			out[lm.Name] = Diverged
+		}
+	}
+	for name, rm := range remote {
+		if !seen[name] && !rm.Deleted {
+			out[name] = Behind
+		}
+	}
+	return out
 }

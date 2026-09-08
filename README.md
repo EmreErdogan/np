@@ -35,8 +35,10 @@ git tag v0.2.0 && git push origin v0.2.0
 
 ```sh
 np new todo                 # opens $EDITOR; or: echo "buy milk" | np new todo
-np ls
+np ls                       # with sync state against the hub: synced/ahead/new/behind/conflict
+np ls --local               # skip the hub lookup
 np cat todo
+np search milk              # name and content, case-insensitive
 np edit todo
 np log todo                 # history with vector clocks
 np show todo 2              # print version 2
@@ -53,8 +55,9 @@ np service install          # run the daemon at login (systemd user / launchd)
 
 Run the daemon (or the service) on every machine. A machine that receives a
 push fans it out to all other online np peers after a 2s debounce, so with a
-hub every edit reaches every machine within a few seconds; without one, the
-mesh still converges through the periodic hub-less syncs and `sync --all`.
+hub every edit reaches every machine within a few seconds. Without a hub the
+daemon syncs with every online np peer on each tick instead, so a pure mesh
+converges too.
 
 Notes are markdown files in `~/.np/notes/` (override with `NP_DIR`). Edit
 them with anything; np notices external changes on the next command.
