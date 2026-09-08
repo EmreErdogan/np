@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emre/np/internal/store"
-	"github.com/emre/np/internal/ts"
+	"github.com/EmreErdogan/np/internal/store"
+	"github.com/EmreErdogan/np/internal/ts"
 )
 
 func newNode(t *testing.T, name, login string) *Node {

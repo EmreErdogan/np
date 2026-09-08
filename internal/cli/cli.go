@@ -17,10 +17,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/emre/np/internal/proto"
-	"github.com/emre/np/internal/service"
-	"github.com/emre/np/internal/store"
-	"github.com/emre/np/internal/ts"
+	"github.com/EmreErdogan/np/internal/proto"
+	"github.com/EmreErdogan/np/internal/service"
+	"github.com/EmreErdogan/np/internal/store"
+	"github.com/EmreErdogan/np/internal/ts"
 )
 
 const usage = `np - share notes across your tailnet
@@ -42,6 +42,7 @@ Sync:
   np serve               accept syncs from peers (foreground)
   np daemon              serve, auto-sync with hub, fan out received changes
   np status              local identity, hub, note count
+  np version
 
 Service (runs "np daemon" in the background at login):
   np service install | uninstall | status
@@ -50,10 +51,17 @@ Notes live in ~/.np/notes as plain markdown (override with NP_DIR).
 Any editor works; np records external edits on the next command.
 `
 
+// Version is set at build time via -ldflags "-X .../cli.Version=v1.2.3".
+var Version = "dev"
+
 // Run executes the command line and returns an exit code.
 func Run(args []string) int {
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		fmt.Print(usage)
+		return 0
+	}
+	if args[0] == "version" || args[0] == "--version" {
+		fmt.Println("np", Version)
 		return 0
 	}
 	if err := run(args[0], args[1:]); err != nil {

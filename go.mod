@@ -1,4 +1,4 @@
-module github.com/emre/np
+module github.com/EmreErdogan/np
 
 go 1.27
 

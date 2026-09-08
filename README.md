@@ -11,12 +11,23 @@ requests only from nodes that belong to the same Tailscale login (extend with
 
 ## Install
 
+Grab a binary from the [releases page](https://github.com/EmreErdogan/np/releases)
+for linux/darwin, amd64/arm64, or build from source:
+
 ```sh
-go build -o np .            # this machine
-GOOS=darwin GOARCH=arm64 go build -o dist/np-darwin-arm64 .
+go install github.com/EmreErdogan/np@latest
 ```
 
 Requires a running Tailscale on every machine.
+
+## Releasing
+
+Tag and push; GitHub Actions builds the binaries with GoReleaser and attaches
+them to the release.
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
 
 ## Use
 

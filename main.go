@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"github.com/emre/np/internal/cli"
+	"github.com/EmreErdogan/np/internal/cli"
 )
 
 func main() { os.Exit(cli.Run(os.Args[1:])) }

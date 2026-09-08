@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emre/np/internal/clock"
+	"github.com/EmreErdogan/np/internal/clock"
 )
 
 func open(t *testing.T, node string) *Store {

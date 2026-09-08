@@ -1,0 +1,20 @@
+version: 2
+project_name: np
+builds:
+  - main: .
+    binary: np
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/EmreErdogan/np/internal/cli.Version={{ .Version }}
+archives:
+  - formats: [tar.gz]
+    name_template: "np_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+checksum:
+  name_template: checksums.txt
+changelog:
+  use: github
+  sort: asc
+release:
+  draft: false

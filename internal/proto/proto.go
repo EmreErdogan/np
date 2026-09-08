@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/emre/np/internal/clock"
-	"github.com/emre/np/internal/store"
-	"github.com/emre/np/internal/ts"
+	"github.com/EmreErdogan/np/internal/clock"
+	"github.com/EmreErdogan/np/internal/store"
+	"github.com/EmreErdogan/np/internal/ts"
 )
 
 const Version = "1"

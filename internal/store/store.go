@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emre/np/internal/clock"
+	"github.com/EmreErdogan/np/internal/clock"
 )
 
 const noteExt = ".md"
