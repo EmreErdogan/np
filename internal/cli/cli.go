@@ -443,10 +443,11 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 			n.Log.Println("fan-out:", err)
 			return
 		}
+		if len(reps) == 0 {
+			n.Log.Println("fan-out: no other online np peers")
+		}
 		for _, rep := range reps {
-			if len(rep.Pulled)+len(rep.Pushed)+len(rep.Errors) > 0 {
-				n.Log.Println("fan-out", rep.Detail())
-			}
+			n.Log.Println("fan-out", rep.Detail())
 		}
 	}
 
