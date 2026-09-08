@@ -257,8 +257,8 @@ func cmdPeers(ctx context.Context, n *proto.Node) error {
 		return err
 	}
 	type row struct {
-		p    ts.Peer
-		np   string
+		p  ts.Peer
+		np string
 	}
 	rows := make([]row, len(peers))
 	done := make(chan struct{}, len(peers))
