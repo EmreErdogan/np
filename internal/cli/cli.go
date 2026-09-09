@@ -407,7 +407,9 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 	if err := listFiles(n, prefix, flat, fileStates, states != nil || local); err != nil {
 		return err
 	}
-	if states == nil && reason != "skipped" {
+	// Without a hub (typically on the hub itself) there is nothing to compare
+	// against; the state column stays empty and that is not an error.
+	if states == nil && reason != "skipped" && n.Store.Config.Hub != "" {
 		fmt.Fprintln(os.Stderr, "sync state unavailable:", reason)
 	}
 	return nil
