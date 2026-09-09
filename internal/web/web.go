@@ -10,6 +10,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/EmreErdogan/np/internal/proto"
@@ -32,12 +33,35 @@ func Mount(n *proto.Node) func(mux *http.ServeMux) {
 
 type ui struct{ n *proto.Node }
 
+// group is one directory in the list page.
+type group struct {
+	Dir   string
+	Notes []*store.Meta
+}
+
 func (u *ui) list(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	u.n.Lock()
 	u.n.Store.Scan()
 	notes := u.n.Store.List(false)
 	u.n.Unlock()
-	page(w, listTmpl, map[string]any{"Node": u.n.Self.Name, "Notes": notes, "Who": peer.Name})
+	byDir := map[string][]*store.Meta{}
+	var dirs []string
+	for _, m := range notes {
+		dir := ""
+		if i := strings.LastIndex(m.Name, "/"); i >= 0 {
+			dir = m.Name[:i]
+		}
+		if _, ok := byDir[dir]; !ok {
+			dirs = append(dirs, dir)
+		}
+		byDir[dir] = append(byDir[dir], m)
+	}
+	sort.Strings(dirs) // "" (root) sorts first
+	var groups []group
+	for _, d := range dirs {
+		groups = append(groups, group{Dir: d, Notes: byDir[d]})
+	}
+	page(w, listTmpl, map[string]any{"Node": u.n.Self.Name, "Groups": groups, "Empty": len(notes) == 0, "Who": peer.Name})
 }
 
 // create renders an empty editor; the name is chosen on save.
@@ -167,7 +191,7 @@ header h1{font-size:18px;margin:0}header small{color:var(--mute)}header a{color:
 .sp{flex:1}a.btn,button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--fg);cursor:pointer;text-decoration:none}
 button.pri{background:var(--acc);border-color:var(--acc);color:#fff}button.danger{color:var(--danger)}
 ul{list-style:none;padding:0;margin:0}li a{display:flex;justify-content:space-between;gap:12px;padding:12px 4px;border-bottom:1px solid var(--line);color:inherit;text-decoration:none}
-li small{color:var(--mute);white-space:nowrap}input,textarea{width:100%;font:inherit;padding:10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit}
+li small{color:var(--mute);white-space:nowrap}h3.dir{font-size:13px;color:var(--mute);margin:18px 0 0;padding:0 4px;text-transform:none;font-weight:600}input,textarea{width:100%;font:inherit;padding:10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit}
 textarea{min-height:60vh;font-family:ui-monospace,Menlo,monospace;font-size:15px;resize:vertical}pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;font-size:15px}
 .row{display:flex;gap:8px;margin:12px 0}#msg{color:var(--danger);min-height:1.5em}.empty{color:var(--mute);padding:24px 0;text-align:center}
 .md{line-height:1.6;word-break:break-word}.md h1{font-size:24px}.md h2{font-size:20px}.md h3{font-size:17px}.md h1,.md h2,.md h3{margin:20px 0 8px;line-height:1.3}
@@ -180,12 +204,17 @@ textarea{min-height:60vh;font-family:ui-monospace,Menlo,monospace;font-size:15px
 .md .chroma{padding:12px;border-radius:8px;overflow-x:auto;font-family:ui-monospace,Menlo,monospace;font-size:14px}
 ` + render.CSS()
 
-var listTmpl = template.Must(template.New("list").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+var listTmpl = template.Must(template.New("list").Funcs(template.FuncMap{"base": func(n string) string {
+	if i := strings.LastIndex(n, "/"); i >= 0 {
+		return n[i+1:]
+	}
+	return n
+}}).Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>np · {{.Node}}</title><style>` + css + `</style><main>
 <header><h1>np</h1><small>{{.Node}} · you: {{.Who}}</small><span class=sp></span><a class=btn href="/new">New</a></header>
 <input id=q placeholder="filter" autofocus oninput="f()">
-<ul id=l>{{range .Notes}}<li><a href="/n/{{.Name}}"><span>{{.Name}}</span><small>{{.ModBy}} · {{.ModTime.Local.Format "Jan 2 15:04"}}</small></a></li>{{else}}<li class=empty>no notes yet</li>{{end}}</ul>
-<script>function f(){var q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#l li').forEach(function(li){li.style.display=li.textContent.toLowerCase().includes(q)?'':'none'})}</script>
+<div id=l>{{range .Groups}}{{if .Dir}}<h3 class=dir>{{.Dir}}/</h3>{{end}}<ul>{{range .Notes}}<li data-n="{{.Name}}"><a href="/n/{{.Name}}"><span>{{base .Name}}</span><small>{{.ModBy}} · {{.ModTime.Local.Format "Jan 2 15:04"}}</small></a></li>{{end}}</ul>{{end}}{{if .Empty}}<p class=empty>no notes yet</p>{{end}}</div>
+<script>function f(){var q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#l li').forEach(function(li){li.style.display=li.dataset.n.toLowerCase().includes(q)?'':'none'});document.querySelectorAll('#l h3').forEach(function(h){var ul=h.nextElementSibling;h.style.display=[].some.call(ul.children,function(li){return li.style.display!=='none'})?'':'none'})}</script>
 </main>`))
 
 var noteTmpl = template.Must(template.New("note").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">

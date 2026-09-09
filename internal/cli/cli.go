@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,7 +33,8 @@ const usage = `np - share notes across your tailnet
 Notes:
   np new <name>          create a note in $EDITOR (or from stdin)
   np edit <name>         edit a note
-  np ls [--local]        list notes with sync state against the hub
+  np ls [dir] [--local]  list notes as a tree, optionally under dir; --local skips the hub
+  np ls --flat           plain list
   np cat <name>          print a note
   np view <name>         render a note in the terminal (markdown or code)
   np search <text>       find notes whose name or content contains text
@@ -240,12 +242,27 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 	if _, err := n.Store.Scan(); err != nil {
 		return err
 	}
+	local, flat, prefix := false, false, ""
+	for _, a := range args {
+		switch a {
+		case "--local":
+			local = true
+		case "--flat":
+			flat = true
+		default:
+			prefix = strings.TrimSuffix(a, "/")
+		}
+	}
 	var states map[string]proto.SyncState
 	reason := "skipped"
-	if !(len(args) == 1 && args[0] == "--local") {
+	if !local {
 		states, reason = hubStates(ctx, n)
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	// Build the row set: local notes plus hub-only notes.
+	type row struct {
+		name, when, by, state string
+	}
+	var rows []row
 	listed := map[string]bool{}
 	for _, m := range n.Store.List(false) {
 		listed[m.Name] = true
@@ -253,12 +270,41 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 		if states != nil {
 			st = string(states[m.Name])
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", m.Name, m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy, st)
+		rows = append(rows, row{m.Name, m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy, st})
 	}
-	for name, st := range states { // notes only the hub has
+	for name, st := range states {
 		if !listed[name] && st == proto.Behind {
-			fmt.Fprintf(tw, "%s\t\t\t%s (hub only)\n", name, st)
+			rows = append(rows, row{name, "", "", "behind (hub only)"})
 		}
+	}
+	if prefix != "" {
+		var kept []row
+		for _, r := range rows {
+			if r.name == prefix || strings.HasPrefix(r.name, prefix+"/") {
+				kept = append(kept, r)
+			}
+		}
+		rows = kept
+	}
+	// Directories first, then notes, at every level.
+	sort.Slice(rows, func(i, j int) bool { return treeLess(rows[i].name, rows[j].name) })
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	lastDir := ""
+	for _, r := range rows {
+		name, indent := r.name, ""
+		if !flat {
+			dir := ""
+			if i := strings.LastIndex(r.name, "/"); i >= 0 {
+				dir, name = r.name[:i], r.name[i+1:]
+			}
+			if dir != lastDir {
+				printDirHeaders(tw, lastDir, dir)
+				lastDir = dir
+			}
+			indent = strings.Repeat("  ", strings.Count(dir, "/")+boolInt(dir != ""))
+		}
+		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\n", indent, name, r.when, r.by, r.state)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -267,6 +313,49 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 		fmt.Fprintln(os.Stderr, "sync state unavailable:", reason)
 	}
 	return nil
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// printDirHeaders prints the directory lines needed to get from prev to dir.
+func printDirHeaders(w io.Writer, prev, dir string) {
+	if dir == "" {
+		return
+	}
+	parts := strings.Split(dir, "/")
+	prevParts := strings.Split(prev, "/")
+	if prev == "" {
+		prevParts = nil
+	}
+	common := 0
+	for common < len(parts) && common < len(prevParts) && parts[common] == prevParts[common] {
+		common++
+	}
+	for i := common; i < len(parts); i++ {
+		fmt.Fprintf(w, "%s%s/\t\t\t\n", strings.Repeat("  ", i), parts[i])
+	}
+}
+
+// treeLess orders paths so that, within each directory, subdirectories come
+// before notes and everything is alphabetical.
+func treeLess(a, b string) bool {
+	as, bs := strings.Split(a, "/"), strings.Split(b, "/")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		aDir, bDir := i < len(as)-1, i < len(bs)-1
+		if as[i] == bs[i] && aDir && bDir {
+			continue
+		}
+		if aDir != bDir {
+			return aDir
+		}
+		return as[i] < bs[i]
+	}
+	return len(as) < len(bs)
 }
 
 func cmdSearch(n *proto.Node, args []string) error {

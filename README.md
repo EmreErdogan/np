@@ -32,8 +32,10 @@ Requires a running Tailscale on every machine.
 
 ```sh
 np new todo                 # opens $EDITOR; or: echo "buy milk" | np new todo
-np ls                       # with sync state against the hub: synced/ahead/new/behind/conflict
-np ls --local               # skip the hub lookup
+np ls                       # tree view with sync state against the hub: synced/ahead/new/behind/conflict
+np ls work                  # only notes under work/
+np ls --local               # skip the hub lookup; --flat for a plain list
+np new work/ideas/next      # slashes make folders
 np cat todo                 # raw content
 np view todo                # rendered in the terminal
 np new config.json          # non-markdown notes keep their extension
