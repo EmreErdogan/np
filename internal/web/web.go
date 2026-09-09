@@ -5,12 +5,17 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"html/template"
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
 
 	"github.com/EmreErdogan/np/internal/proto"
 	"github.com/EmreErdogan/np/internal/store"
@@ -30,6 +35,21 @@ func Mount(n *proto.Node) func(mux *http.ServeMux) {
 }
 
 type ui struct{ n *proto.Node }
+
+// md renders GitHub-flavoured markdown. Raw HTML in notes is escaped, not
+// rendered, so a note cannot inject script into the page.
+var md = goldmark.New(
+	goldmark.WithExtensions(extension.GFM, extension.Typographer),
+	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+)
+
+func renderMarkdown(src []byte) template.HTML {
+	var buf bytes.Buffer
+	if err := md.Convert(src, &buf); err != nil {
+		return template.HTML("<pre>" + template.HTMLEscapeString(string(src)) + "</pre>")
+	}
+	return template.HTML(buf.String())
+}
 
 func (u *ui) list(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	u.n.Lock()
@@ -62,10 +82,15 @@ func (u *ui) note(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
 	if m != nil && !m.Deleted {
 		hash = m.Hash
 	}
-	render(w, noteTmpl, map[string]any{
+	edit := r.URL.Query().Has("edit") || hash == ""
+	data := map[string]any{
 		"Node": u.n.Self.Name, "Name": name, "Content": string(content),
-		"Hash": hash, "New": hash == "", "Edit": r.URL.Query().Has("edit") || hash == "",
-	})
+		"Hash": hash, "New": hash == "", "Edit": edit,
+	}
+	if !edit {
+		data["HTML"] = renderMarkdown(content)
+	}
+	render(w, noteTmpl, data)
 }
 
 type saveReq struct {
@@ -163,6 +188,13 @@ ul{list-style:none;padding:0;margin:0}li a{display:flex;justify-content:space-be
 li small{color:var(--mute);white-space:nowrap}input,textarea{width:100%;font:inherit;padding:10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit}
 textarea{min-height:60vh;font-family:ui-monospace,Menlo,monospace;font-size:15px;resize:vertical}pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;font-size:15px}
 .row{display:flex;gap:8px;margin:12px 0}#msg{color:var(--danger);min-height:1.5em}.empty{color:var(--mute);padding:24px 0;text-align:center}
+.md{line-height:1.6;word-break:break-word}.md h1{font-size:24px}.md h2{font-size:20px}.md h3{font-size:17px}.md h1,.md h2,.md h3{margin:20px 0 8px;line-height:1.3}
+.md p{margin:0 0 12px}.md ul,.md ol{padding-left:24px;margin:0 0 12px}.md li{margin:2px 0}.md li.task-list-item{list-style:none;margin-left:-20px}
+.md code{font-family:ui-monospace,Menlo,monospace;font-size:14px;background:rgba(127,127,127,.15);padding:1px 5px;border-radius:4px}
+.md pre{background:rgba(127,127,127,.12);padding:12px;border-radius:8px;overflow-x:auto;font-size:14px}.md pre code{background:none;padding:0}
+.md blockquote{margin:0 0 12px;padding:4px 14px;border-left:3px solid var(--line);color:var(--mute)}.md a{color:var(--acc)}
+.md table{border-collapse:collapse;margin:0 0 12px;display:block;overflow-x:auto}.md th,.md td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+.md img{max-width:100%}.md hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 `
 
 var listTmpl = template.Must(template.New("list").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -189,5 +221,5 @@ function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'applic
 function save(){var n=document.getElementById('name').value.trim();post('/web/save',{name:n,content:document.getElementById('c').value,base:base}).then(function(){location.href='/n/'+n}).catch(function(e){document.getElementById('msg').textContent=e.message})}
 function del(){if(!confirm('Delete {{.Name}}?'))return;post('/web/delete',{name:{{.Name}}}).then(function(){location.href='/'}).catch(function(e){document.getElementById('msg').textContent=e.message})}
 </script>
-{{else}}<h2 style="margin:0 0 8px;font-size:20px">{{.Name}}</h2><pre>{{.Content}}</pre>{{end}}
+{{else}}<div class=md>{{.HTML}}</div>{{end}}
 </main>`))

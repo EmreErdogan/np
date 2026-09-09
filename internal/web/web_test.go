@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -92,5 +93,30 @@ func TestWebFlow(t *testing.T) {
 	}
 	if m := n.Store.Get("todo"); !m.Deleted || m.ModBy != "phone" {
 		t.Fatalf("expected tombstone by phone: %+v", m)
+	}
+}
+
+func TestMarkdownRender(t *testing.T) {
+	n, srv := setup(t)
+	n.Store.Write("doc", []byte("# Title\n\n- [x] done\n\n<script>alert(1)</script>\n\n| a | b |\n|---|---|\n| 1 | 2 |\n"))
+	resp, err := http.Get(srv.URL + "/n/doc")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("%v %d", err, resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+	for _, want := range []string{"<h1 id=\"title\">Title</h1>", "type=\"checkbox\"", "<table>"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(html, "<script>alert(1)</script>") {
+		t.Error("raw html must not be rendered")
+	}
+	// Edit view still shows the source.
+	resp, _ = http.Get(srv.URL + "/n/doc?edit")
+	body, _ = io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "# Title") {
+		t.Error("edit view should contain raw markdown")
 	}
 }
