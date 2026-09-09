@@ -248,11 +248,12 @@ func hubStates(ctx context.Context, n *proto.Node) (notes, files map[string]prot
 	if err != nil {
 		return nil, nil, fmt.Sprintf("hub %s unreachable", p.Name)
 	}
+	notes = proto.Compare(n.Store.List(true), remote)
 	remoteFiles, err := n.RemoteFiles(ctx, p)
-	if err != nil {
-		return nil, nil, fmt.Sprintf("hub %s unreachable", p.Name)
+	if err != nil { // an older np on the hub: note states are still valid
+		return notes, nil, ""
 	}
-	return proto.Compare(n.Store.List(true), remote), proto.CompareFiles(n.Store.Files(true), remoteFiles), ""
+	return notes, proto.CompareFiles(n.Store.Files(true), remoteFiles), ""
 }
 
 // stdinPiped reports whether stdin carries data rather than a terminal.
