@@ -1,8 +1,10 @@
 # np
 
-Share plain-text notes between the machines on your Tailscale tailnet.
-Think of it as a tiny, opinionated git for notes: every machine has a full
-copy, every version is kept, and sync works peer-to-peer or through a hub.
+Share plain-text notes, and any other files, between the machines on your
+Tailscale tailnet. Think of it as a tiny, opinionated git for notes: every
+machine has a full copy, every version is kept, concurrent edits are merged,
+and sync works peer-to-peer or through a hub. Big files ride along lazily:
+every machine knows about them, only the ones that ask download them.
 
 No accounts, no TLS setup, no tokens: the tailnet is the network and the
 identity. `np serve` listens only on the machine's Tailscale IP and accepts
@@ -70,9 +72,10 @@ np service restart          # e.g. after editing config.json
 
 Run the daemon (or the service) on every machine. A machine that receives a
 push fans it out to all other online np peers after a 2s debounce, so with a
-hub every edit reaches every machine within a few seconds. Without a hub the
-daemon syncs with every online np peer on each tick instead, so a pure mesh
-converges too.
+hub every edit reaches every machine within a few seconds. Without a hub, or
+while the hub is unreachable, the daemon syncs with every online np peer on
+each tick instead, so a pure mesh converges too. Pick an always-on machine as
+the hub and give it `keep_all` so it holds every file.
 
 Notes are plain files in `~/.np/notes/` (override with `NP_DIR`). A name
 without an extension is markdown and stored as `name.md`; names with a short
@@ -98,6 +101,8 @@ bytes follow automatically only when the file is at most `auto_fetch_bytes`
 when the node has `keep_all` set (do that on the hub, which then acts as
 the archive). Bigger files are listed as "not fetched" until `np get`, or
 the Fetch button in the web UI. `np ls` shows files in a block at the end.
+`np rm` deletes a file when no note has that name; `np path` works for both.
+Set `auto_fetch_bytes` to `-1` to never fetch automatically.
 
 ## Web UI
 
