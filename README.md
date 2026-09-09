@@ -62,6 +62,7 @@ np sync desktop              # or with any peer directly
 np sync --all               # every online peer that runs np
 np daemon                   # serve + auto-sync every 15s (run on the hub too)
 np service install          # run the daemon at login (systemd user / launchd)
+np service restart          # e.g. after editing config.json
 ```
 
 Run the daemon (or the service) on every machine. A machine that receives a

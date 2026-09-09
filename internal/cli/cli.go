@@ -72,7 +72,7 @@ The daemon also serves a phone-friendly web UI at http://<tailscale-ip>:7373/
 for reading and editing notes from any device on the tailnet.
 
 Service (runs "np daemon" in the background at login):
-  np service install | uninstall | status
+  np service install | uninstall | restart | status
 
 Notes live in ~/.np/notes and files in ~/.np/files (override with NP_DIR). A name
 without an extension is markdown ("todo" -> todo.md); names like config.json
@@ -980,7 +980,7 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 }
 
 func cmdService(n *proto.Node, args []string) error {
-	sub, err := oneArg(args, "install | uninstall | status")
+	sub, err := oneArg(args, "install | uninstall | restart | status")
 	if err != nil {
 		return err
 	}
@@ -1004,6 +1004,16 @@ func cmdService(n *proto.Node, args []string) error {
 		return nil
 	case "uninstall":
 		return service.Uninstall()
+	case "restart":
+		ok, err := service.Restart()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("service is not installed (np service install)")
+		}
+		fmt.Println("service restarted")
+		return nil
 	case "status":
 		st, err := service.Status()
 		if err != nil {
