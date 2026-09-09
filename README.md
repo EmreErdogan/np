@@ -11,25 +11,22 @@ requests only from nodes that belong to the same Tailscale login (extend with
 
 ## Install
 
-Grab a binary from the [releases page](https://github.com/EmreErdogan/np/releases)
-for linux/darwin, amd64/arm64, or build from source:
+One line, no sudo:
 
 ```sh
-go install github.com/EmreErdogan/np@latest
+curl -fsSL https://raw.githubusercontent.com/EmreErdogan/np/main/install.sh | sh
 ```
 
-Requires a running Tailscale on every machine. Later, `np upgrade` fetches
-the newest release, verifies its checksum, replaces itself and restarts the
-service if one is installed.
+It downloads the latest release for your OS and CPU, verifies the checksum,
+puts `np` in `~/.local/bin` (override with `NP_INSTALL_DIR`) and adds that
+directory to your shell's PATH if needed. Later, `np upgrade` fetches the
+newest release in place and restarts the service if one is installed.
 
-## Releasing
+Alternatives: grab a binary from the
+[releases page](https://github.com/EmreErdogan/np/releases), or
+`go install github.com/EmreErdogan/np@latest`.
 
-Tag and push; GitHub Actions builds the binaries with GoReleaser and attaches
-them to the release.
-
-```sh
-git tag v0.2.0 && git push origin v0.2.0
-```
+Requires a running Tailscale on every machine.
 
 ## Use
 
