@@ -19,6 +19,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/EmreErdogan/np/internal/merge"
 	"github.com/EmreErdogan/np/internal/proto"
 	"github.com/EmreErdogan/np/internal/render"
 	"github.com/EmreErdogan/np/internal/service"
@@ -46,6 +47,9 @@ Notes:
   np rm <name>           delete a note (tombstone syncs to peers)
   np log <name>          version history
   np show <name> <seq>   print a historical version
+  np diff <name> [seq | a b]
+                         changes in the latest version (or in version seq,
+                         or between versions a and b); unified diff, coloured on a terminal
 
 Files (any type; synced lazily):
   np put <path> [name]   copy a file in (name defaults to the file's base name;
@@ -142,6 +146,8 @@ func run(cmd string, args []string) error {
 		return cmdDrop(n, args)
 	case "log":
 		return cmdLog(n, args)
+	case "diff":
+		return cmdDiff(n, args)
 	case "show":
 		return cmdShow(n, args)
 	case "peers":
@@ -813,6 +819,108 @@ func cmdShow(n *proto.Node, args []string) error {
 	}
 	_, err = os.Stdout.Write(data)
 	return err
+}
+
+// cmdDiff prints what changed between two versions of a note.
+func cmdDiff(n *proto.Node, args []string) error {
+	if len(args) < 1 || len(args) > 3 {
+		return errors.New("expected <name> [seq | a b]")
+	}
+	name := store.Canon(args[0])
+	n.Store.Scan()
+	m := n.Store.Get(name)
+	if m == nil {
+		return fmt.Errorf("no note %q", name)
+	}
+	last := len(m.History)
+	parse := func(s string) (int, error) {
+		v, err := strconv.Atoi(s)
+		if err != nil || v < 1 || v > last {
+			return 0, fmt.Errorf("seq must be 1..%d", last)
+		}
+		return v, nil
+	}
+	var from, to int
+	var err error
+	switch len(args) {
+	case 1:
+		from, to = last-1, last
+	case 2:
+		if to, err = parse(args[1]); err != nil {
+			return err
+		}
+		from = to - 1
+	case 3:
+		if from, err = parse(args[1]); err != nil {
+			return err
+		}
+		if to, err = parse(args[2]); err != nil {
+			return err
+		}
+	}
+	a, labelA, err := versionContent(n, name, m, from)
+	if err != nil {
+		return err
+	}
+	b, labelB, err := versionContent(n, name, m, to)
+	if err != nil {
+		return err
+	}
+	out := merge.Unified(a, b, labelA, labelB, 3)
+	if out == "" {
+		fmt.Fprintf(os.Stderr, "no changes between v%d and v%d\n", from, to)
+		return nil
+	}
+	if fi, _ := os.Stdout.Stat(); fi != nil && fi.Mode()&os.ModeCharDevice == 0 {
+		_, err = os.Stdout.WriteString(out)
+		return err
+	}
+	return colourDiff(os.Stdout, out)
+}
+
+// versionContent returns a version's snapshot (empty for seq 0 or a
+// deletion) and a label for the diff header.
+func versionContent(n *proto.Node, name string, m *store.Meta, seq int) ([]byte, string, error) {
+	if seq < 1 {
+		return nil, name + " (nothing)", nil
+	}
+	v := m.History[seq-1]
+	label := fmt.Sprintf("%s v%d (%s, %s)", name, seq, v.ModBy, v.ModTime.Local().Format("2006-01-02 15:04"))
+	if v.Deleted {
+		return nil, label + " deleted", nil
+	}
+	data, err := n.Store.Snapshot(name, v.Hash)
+	return data, label, err
+}
+
+func colourDiff(w io.Writer, diff string) error {
+	const reset, red, green, cyan, bold = "\x1b[0m", "\x1b[31m", "\x1b[32m", "\x1b[36m", "\x1b[1m"
+	for _, line := range strings.SplitAfter(diff, "\n") {
+		if line == "" {
+			continue
+		}
+		c := ""
+		switch {
+		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+			c = bold
+		case strings.HasPrefix(line, "@@"):
+			c = cyan
+		case line[0] == '+':
+			c = green
+		case line[0] == '-':
+			c = red
+		}
+		if c == "" {
+			if _, err := io.WriteString(w, line); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "%s%s%s\n", c, strings.TrimSuffix(line, "\n"), reset); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func cmdPeers(ctx context.Context, n *proto.Node) error {

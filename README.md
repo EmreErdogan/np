@@ -52,6 +52,7 @@ pbpaste | np add links      # ...or from stdin
 np add -t journal "call"    # prefix a timestamp
 np log todo                 # history with vector clocks
 np show todo 2              # print version 2
+np diff todo                # what the latest version changed; np diff todo 3 (v2->v3); np diff todo 2 5
 np rm todo                  # deletion syncs as a tombstone
 
 np put ~/Pictures/cat.jpg   # share any file (name defaults to cat.jpg)
@@ -110,8 +111,9 @@ The daemon serves a small phone-friendly page at `http://<tailscale-ip>:7373/`
 (the URL is shown by `np status`). Open it from any device on the tailnet,
 such as a phone running Tailscale, to read, edit, create and delete notes.
 Markdown notes are rendered; other file types are shown as highlighted code.
-Every note has a History page listing its versions; any version can be
-viewed and restored as the new current content. Files have their own list
+Every note has a History page listing its versions with the size of each
+change; a version page shows the diff from the previous one and can restore
+it as the new current content. Files have their own list
 with an upload box (photos from a phone, for instance); images, video,
 audio and small text files preview inline, everything else downloads.
 Edits are committed like local edits and fanned out to peers immediately.

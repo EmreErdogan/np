@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/EmreErdogan/np/internal/merge"
 	"github.com/EmreErdogan/np/internal/proto"
 	"github.com/EmreErdogan/np/internal/render"
 	"github.com/EmreErdogan/np/internal/store"
@@ -126,20 +127,38 @@ func (u *ui) history(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
 			return
 		}
 		ver := m.History[seq-1]
-		var content []byte
+		var content, prev []byte
 		if !ver.Deleted {
 			content, _ = u.n.Store.Snapshot(name, ver.Hash)
+		}
+		if seq > 1 && !m.History[seq-2].Deleted {
+			prev, _ = u.n.Store.Snapshot(name, m.History[seq-2].Hash)
 		}
 		page(w, versionTmpl, map[string]any{
 			"Node": u.n.Self.Name, "Name": name, "Ver": ver, "Total": len(m.History),
 			"HTML": render.HTML(name, content), "Current": seq == len(m.History) && !m.Deleted,
+			"Diff": diffIfPrev(seq, prev, content), "Prev": seq - 1,
 		})
 		return
 	}
-	// Newest first.
-	vers := make([]store.Version, 0, len(m.History))
+	// Newest first, with the size of each change.
+	type verRow struct {
+		store.Version
+		Added, Removed int
+	}
+	vers := make([]verRow, 0, len(m.History))
+	var next []byte
+	if !m.Deleted {
+		next, _ = u.n.Store.Snapshot(name, m.History[len(m.History)-1].Hash)
+	}
 	for i := len(m.History) - 1; i >= 0; i-- {
-		vers = append(vers, m.History[i])
+		var prev []byte
+		if i > 0 && !m.History[i-1].Deleted {
+			prev, _ = u.n.Store.Snapshot(name, m.History[i-1].Hash)
+		}
+		add, del := merge.Stat(prev, next)
+		vers = append(vers, verRow{m.History[i], add, del})
+		next = prev
 	}
 	page(w, historyTmpl, map[string]any{"Node": u.n.Self.Name, "Name": name, "Versions": vers, "Deleted": m.Deleted})
 }
@@ -274,6 +293,46 @@ func (u *ui) del(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	writeJSON(w, map[string]string{"ok": "1"})
 }
 
+func diffIfPrev(seq int, prev, cur []byte) template.HTML {
+	if seq < 2 {
+		return ""
+	}
+	return diffHTML(prev, cur)
+}
+
+// diffHTML renders the unified diff between a and b as coloured lines, or
+// "" when they are equal.
+func diffHTML(a, b []byte) template.HTML {
+	hunks := merge.Hunks(a, b, 3)
+	if len(hunks) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(`<pre class=diff>`)
+	for _, h := range hunks {
+		sb.WriteString(`<span class=hunk>` + template.HTMLEscapeString(h.Header()) + "</span>\n")
+		for _, e := range h.Edits {
+			cls, sign := "", " "
+			switch e.Op {
+			case merge.Add:
+				cls, sign = "add", "+"
+			case merge.Del:
+				cls, sign = "del", "-"
+			}
+			if cls != "" {
+				sb.WriteString(`<span class=` + cls + `>`)
+			}
+			sb.WriteString(sign + template.HTMLEscapeString(e.Text))
+			if cls != "" {
+				sb.WriteString(`</span>`)
+			}
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString(`</pre>`)
+	return template.HTML(sb.String())
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
@@ -307,6 +366,8 @@ textarea{min-height:60vh;font-family:ui-monospace,Menlo,monospace;font-size:15px
 .md img{max-width:100%}.md hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 .ver{display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid var(--line);align-items:baseline}.ver a{color:inherit;text-decoration:none;flex:1}.ver small{color:var(--mute)}
 .banner{background:rgba(127,127,127,.12);border-radius:8px;padding:10px 14px;margin-bottom:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.banner .sp{flex:1}
+pre.diff{background:rgba(127,127,127,.1);padding:12px;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.45}pre.diff .add{color:#1a7f37;background:rgba(46,160,67,.15);display:inline-block;width:100%}pre.diff .del{color:#b23b3b;background:rgba(248,81,73,.15);display:inline-block;width:100%}pre.diff .hunk{color:var(--mute)}
+@media(prefers-color-scheme:dark){pre.diff .add{color:#7ee787}pre.diff .del{color:#ffa198}}.stat{white-space:nowrap}.stat .add{color:#1a7f37}.stat .del{color:#b23b3b}
 .prev{max-width:100%;border-radius:8px;display:block}li a .stub{color:var(--mute);font-size:13px}.up{margin-top:8px;display:flex;gap:8px;align-items:center}.up input[type=file]{flex:1;padding:6px}
 .md .chroma{padding:12px;border-radius:8px;overflow-x:auto;font-family:ui-monospace,Menlo,monospace;font-size:14px}
 ` + render.CSS()
@@ -358,7 +419,7 @@ var historyTmpl = template.Must(template.New("history").Parse(`<!doctype html><m
 <title>{{.Name}} history · np</title><style>` + css + `</style><main>
 <header><h1><a href="/">np</a></h1><small>{{.Node}}</small><span class=sp></span><a class=btn href="/n/{{.Name}}">Back</a></header>
 <h2 style="margin:0 0 8px;font-size:20px">{{.Name}}</h2>
-{{range .Versions}}<div class=ver><a href="/h/{{$.Name}}?v={{.Seq}}">v{{.Seq}}{{if .Deleted}} · deleted{{end}}</a><small>{{.ModBy}}</small><small>{{.ModTime.Local.Format "Jan 2 15:04:05"}}</small><small>{{.Clock}}</small></div>{{end}}
+{{range .Versions}}<div class=ver><a href="/h/{{$.Name}}?v={{.Seq}}">v{{.Seq}}{{if .Deleted}} · deleted{{end}}</a><small class=stat>{{if .Added}}<span class=add>+{{.Added}}</span>{{end}} {{if .Removed}}<span class=del>−{{.Removed}}</span>{{end}}</small><small>{{.ModBy}}</small><small>{{.ModTime.Local.Format "Jan 2 15:04:05"}}</small><small>{{.Clock}}</small></div>{{end}}
 </main>`))
 
 var versionTmpl = template.Must(template.New("version").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -367,6 +428,7 @@ var versionTmpl = template.Must(template.New("version").Parse(`<!doctype html><m
 <div class=banner><span>v{{.Ver.Seq}} of {{.Total}} · {{.Ver.ModBy}} · {{.Ver.ModTime.Local.Format "Jan 2 15:04:05"}}</span><span class=sp></span>
 {{if .Ver.Deleted}}<span>deleted</span>{{else if not .Current}}<button class=pri onclick="restore()">Restore this version</button>{{else}}<span>current</span>{{end}}</div>
 <div id=msg></div>
+{{if .Diff}}<details {{if not .Current}}open{{end}}><summary style="cursor:pointer;color:var(--mute);margin:0 0 8px">Changes from v{{.Prev}}</summary>{{.Diff}}</details>{{end}}
 {{if not .Ver.Deleted}}<div class=md>{{.HTML}}</div>{{end}}
 <script>function restore(){if(!confirm('Make v{{.Ver.Seq}} the current version of {{.Name}}?'))return;
 fetch('/web/restore',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'np'},body:JSON.stringify({name:{{.Name}},seq:{{.Ver.Seq}}})})

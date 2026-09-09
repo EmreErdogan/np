@@ -267,3 +267,27 @@ func TestFileStubPage(t *testing.T) {
 		t.Fatal("list should mark stubs")
 	}
 }
+
+func TestHistoryDiff(t *testing.T) {
+	n, srv := setup(t)
+	n.Store.Write("d", []byte("one\ntwo\n"))
+	n.Store.Write("d", []byte("one\n2\nthree\n"))
+	resp, _ := http.Get(srv.URL + "/h/d")
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `<span class=add>+2</span>`) || !strings.Contains(string(body), `<span class=del>−1</span>`) {
+		t.Fatalf("history stats: %s", body)
+	}
+	resp, _ = http.Get(srv.URL + "/h/d?v=2")
+	body, _ = io.ReadAll(resp.Body)
+	for _, want := range []string{"Changes from v1", `<span class=del>-two</span>`, `<span class=add>+2</span>`, `<span class=add>+three</span>`, "@@ -1,2 +1,3 @@"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("missing %q in %s", want, body)
+		}
+	}
+	// First version has nothing to compare against.
+	resp, _ = http.Get(srv.URL + "/h/d?v=1")
+	body, _ = io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "Changes from") {
+		t.Fatal("v1 should not show a diff section")
+	}
+}
