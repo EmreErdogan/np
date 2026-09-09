@@ -181,3 +181,34 @@ func TestExtensions(t *testing.T) {
 		t.Fatal(string(got))
 	}
 }
+
+func TestJoin(t *testing.T) {
+	cases := []struct{ existing, text, want string }{
+		{"", "hi", "hi\n"},
+		{"# T\n\npara\n", "next", "# T\n\npara\n\nnext\n"},
+		{"para", "next\n\n", "para\n\nnext\n"},
+		{"para\n\n", "next", "para\n\nnext\n"},
+		{"- a\n- b\n", "- c", "- a\n- b\n- c\n"},
+		{"- a\n- [ ] b\n", "- [x] c", "- a\n- [ ] b\n- [x] c\n"},
+		{"1. a\n", "2. b", "1. a\n2. b\n"},
+		{"- a\n", "plain", "- a\n\nplain\n"},
+		{"para\n", "- item", "para\n\n- item\n"},
+	}
+	for _, c := range cases {
+		if got := string(Join(c.existing, c.text)); got != c.want {
+			t.Errorf("Join(%q,%q)=%q want %q", c.existing, c.text, got, c.want)
+		}
+	}
+	s := open(t, "a")
+	if err := s.Append("log", "first"); err != nil {
+		t.Fatal(err)
+	}
+	s.Append("log", "second")
+	got, _ := s.Read("log")
+	if string(got) != "first\n\nsecond\n" || s.Get("log").Clock.String() != "a:2" {
+		t.Fatalf("%q %s", got, s.Get("log").Clock)
+	}
+	if err := s.Append("log", "  "); err == nil {
+		t.Fatal("empty append should fail")
+	}
+}

@@ -517,3 +517,49 @@ func writeJSON(p string, v any) error {
 	}
 	return os.Rename(tmp, p)
 }
+
+// listItemRe matches a markdown bullet, numbered or task list line.
+var listItemRe = regexp.MustCompile(`^\s*([-*+]|\d+[.)])\s`)
+
+// Join appends text to existing content following np's separator rule: a
+// blank line is inserted so the addition renders as its own paragraph,
+// except when a list item is appended to a list, which keeps the list tight.
+func Join(existing, text string) []byte {
+	text = strings.TrimRight(text, "\n") + "\n"
+	if strings.TrimSpace(existing) == "" {
+		return []byte(text)
+	}
+	if !strings.HasSuffix(existing, "\n") {
+		existing += "\n"
+	}
+	lines := strings.Split(strings.TrimRight(existing, "\n"), "\n")
+	last := lines[len(lines)-1]
+	tight := listItemRe.MatchString(text) && listItemRe.MatchString(last)
+	if !tight && !strings.HasSuffix(existing, "\n\n") {
+		existing += "\n"
+	}
+	return []byte(existing + text)
+}
+
+// Append adds text to the end of a note (creating it if needed) as this node.
+func (s *Store) Append(name, text string) error {
+	return s.AppendBy(name, text, s.Node)
+}
+
+// AppendBy is Append attributed to another author (see WriteBy).
+func (s *Store) AppendBy(name, text, by string) error {
+	if err := ValidName(name); err != nil {
+		return err
+	}
+	if strings.TrimSpace(text) == "" {
+		return errors.New("nothing to add")
+	}
+	if _, err := s.Scan(); err != nil {
+		return err
+	}
+	existing, err := s.Read(name)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return s.WriteBy(name, Join(string(existing), text), by)
+}

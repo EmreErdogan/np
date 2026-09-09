@@ -135,3 +135,21 @@ func TestCodeRender(t *testing.T) {
 		t.Fatal(resp.StatusCode)
 	}
 }
+
+func TestAppend(t *testing.T) {
+	n, srv := setup(t)
+	n.Store.Write("list", []byte("- a\n"))
+	if r := post(t, srv.URL+"/web/append", `{"name":"list","content":"- b"}`, true); r.StatusCode != 200 {
+		t.Fatalf("append: %d", r.StatusCode)
+	}
+	if r := post(t, srv.URL+"/web/append", `{"name":"list","content":"note"}`, true); r.StatusCode != 200 {
+		t.Fatalf("append: %d", r.StatusCode)
+	}
+	got, _ := n.Store.Read("list")
+	if string(got) != "- a\n- b\n\nnote\n" || n.Store.Get("list").ModBy != "phone" {
+		t.Fatalf("%q by %s", got, n.Store.Get("list").ModBy)
+	}
+	if r := post(t, srv.URL+"/web/append", `{"name":"list","content":"x"}`, false); r.StatusCode != http.StatusForbidden {
+		t.Fatal("unguarded append accepted")
+	}
+}

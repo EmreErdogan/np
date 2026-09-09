@@ -33,6 +33,9 @@ const usage = `np - share notes across your tailnet
 Notes:
   np new <name>          create a note in $EDITOR (or from stdin)
   np edit <name>         edit a note
+  np add [-t] <name> [text]
+                         append text (or stdin, or an editor buffer) to a note;
+                         -t prefixes a timestamp. Creates the note if missing.
   np ls [dir] [--local]  list notes as a tree, optionally under dir; --local skips the hub
   np ls --flat           plain list
   np cat <name>          print a note
@@ -103,6 +106,8 @@ func run(cmd string, args []string) error {
 	switch cmd {
 	case "new", "edit":
 		return cmdEdit(n, args, cmd == "new")
+	case "add", "append":
+		return cmdAdd(n, args)
 	case "ls", "list":
 		return cmdList(ctx, n, args)
 	case "search", "grep":
@@ -194,18 +199,8 @@ func cmdEdit(n *proto.Node, args []string, create bool) error {
 			return err
 		}
 	}
-	editor := os.Getenv("VISUAL")
-	if editor == "" {
-		editor = os.Getenv("EDITOR")
-	}
-	if editor == "" {
-		editor = "vi"
-	}
-	parts := strings.Fields(editor)
-	c := exec.Command(parts[0], append(parts[1:], p)...)
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("%s: %w", editor, err)
+	if err := runEditor(p); err != nil {
+		return err
 	}
 	changed, err := n.Store.Scan()
 	if err != nil {
@@ -236,6 +231,83 @@ func hubStates(ctx context.Context, n *proto.Node) (map[string]proto.SyncState, 
 		return nil, fmt.Sprintf("hub %s unreachable", p.Name)
 	}
 	return proto.Compare(n.Store.List(true), remote), ""
+}
+
+// stdinPiped reports whether stdin carries data rather than a terminal.
+func stdinPiped() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice == 0
+}
+
+func editorCmd() string {
+	for _, v := range []string{"VISUAL", "EDITOR"} {
+		if e := os.Getenv(v); e != "" {
+			return e
+		}
+	}
+	return "vi"
+}
+
+func runEditor(path string) error {
+	parts := strings.Fields(editorCmd())
+	c := exec.Command(parts[0], append(parts[1:], path)...)
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("%s: %w", parts[0], err)
+	}
+	return nil
+}
+
+func cmdAdd(n *proto.Node, args []string) error {
+	stamp := false
+	if len(args) > 0 && (args[0] == "-t" || args[0] == "--time") {
+		stamp, args = true, args[1:]
+	}
+	if len(args) == 0 {
+		return errors.New("expected <name> [text]")
+	}
+	name := store.Canon(args[0])
+	if err := store.ValidName(name); err != nil {
+		return err
+	}
+	var text string
+	switch {
+	case len(args) > 1:
+		text = strings.Join(args[1:], " ")
+	case stdinPiped():
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+		text = string(b)
+	default:
+		tmp, err := os.CreateTemp("", "np-add-*.md")
+		if err != nil {
+			return err
+		}
+		tmp.Close()
+		defer os.Remove(tmp.Name())
+		if err := runEditor(tmp.Name()); err != nil {
+			return err
+		}
+		b, err := os.ReadFile(tmp.Name())
+		if err != nil {
+			return err
+		}
+		text = string(b)
+	}
+	if strings.TrimSpace(text) == "" {
+		fmt.Println("nothing added")
+		return nil
+	}
+	if stamp {
+		text = time.Now().Format("2006-01-02 15:04") + " " + strings.TrimLeft(text, " ")
+	}
+	if err := n.Store.Append(name, text); err != nil {
+		return err
+	}
+	fmt.Printf("added to %s (%s)\n", name, n.Store.Get(name).Clock)
+	return nil
 }
 
 func cmdList(ctx context.Context, n *proto.Node, args []string) error {

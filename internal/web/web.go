@@ -28,6 +28,7 @@ func Mount(n *proto.Node) func(mux *http.ServeMux) {
 		mux.HandleFunc("GET /n/{name...}", n.Auth(w.note))
 		mux.HandleFunc("POST /web/save", n.Auth(w.save))
 		mux.HandleFunc("POST /web/delete", n.Auth(w.del))
+		mux.HandleFunc("POST /web/append", n.Auth(w.appendNote))
 	}
 }
 
@@ -148,6 +149,28 @@ func (u *ui) save(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	writeJSON(w, map[string]string{"hash": u.n.Store.Get(req.Name).Hash})
 }
 
+func (u *ui) appendNote(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
+	if !guarded(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var req saveReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Name = store.Canon(strings.TrimSpace(req.Name))
+	u.n.Lock()
+	defer u.n.Unlock()
+	if err := u.n.Store.AppendBy(req.Name, req.Content, peer.Name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	u.n.Logf("%s appended to %s via web", peer.Name, req.Name)
+	u.n.NotifyChanged()
+	writeJSON(w, map[string]string{"ok": "1"})
+}
+
 func (u *ui) del(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	if !guarded(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -193,7 +216,7 @@ button.pri{background:var(--acc);border-color:var(--acc);color:#fff}button.dange
 ul{list-style:none;padding:0;margin:0}li a{display:flex;justify-content:space-between;gap:12px;padding:12px 4px;border-bottom:1px solid var(--line);color:inherit;text-decoration:none}
 li small{color:var(--mute);white-space:nowrap}h3.dir{font-size:13px;color:var(--mute);margin:18px 0 0;padding:0 4px;text-transform:none;font-weight:600}input,textarea{width:100%;font:inherit;padding:10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit}
 textarea{min-height:60vh;font-family:ui-monospace,Menlo,monospace;font-size:15px;resize:vertical}pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;font-size:15px}
-.row{display:flex;gap:8px;margin:12px 0}#msg{color:var(--danger);min-height:1.5em}.empty{color:var(--mute);padding:24px 0;text-align:center}
+.row{display:flex;gap:8px;margin:12px 0}form.row{margin-top:24px;padding-top:16px;border-top:1px solid var(--line)}#msg{color:var(--danger);min-height:1.5em}.empty{color:var(--mute);padding:24px 0;text-align:center}
 .md{line-height:1.6;word-break:break-word}.md h1{font-size:24px}.md h2{font-size:20px}.md h3{font-size:17px}.md h1,.md h2,.md h3{margin:20px 0 8px;line-height:1.3}
 .md p{margin:0 0 12px}.md ul,.md ol{padding-left:24px;margin:0 0 12px}.md li{margin:2px 0}.md li.task-list-item{list-style:none;margin-left:-20px}
 .md code{font-family:ui-monospace,Menlo,monospace;font-size:14px;background:rgba(127,127,127,.15);padding:1px 5px;border-radius:4px}
@@ -233,5 +256,12 @@ function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'applic
 function save(){var n=document.getElementById('name').value.trim();post('/web/save',{name:n,content:document.getElementById('c').value,base:base}).then(function(){location.href='/n/'+n}).catch(function(e){document.getElementById('msg').textContent=e.message})}
 function del(){if(!confirm('Delete {{.Name}}?'))return;post('/web/delete',{name:{{.Name}}}).then(function(){location.href='/'}).catch(function(e){document.getElementById('msg').textContent=e.message})}
 </script>
-{{else}}<div class=md>{{.HTML}}</div>{{end}}
+{{else}}<div class=md>{{.HTML}}</div>
+<form class=row onsubmit="return add()"><input id=a placeholder="add a line…" autocomplete=off><button class=pri>Add</button></form>
+<div id=msg></div>
+<script>
+function add(){var t=document.getElementById('a').value;if(!t.trim())return false;
+fetch('/web/append',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'np'},body:JSON.stringify({name:{{.Name}},content:t})})
+.then(function(r){return r.ok?location.reload():r.text().then(function(m){document.getElementById('msg').textContent=m})});return false}
+</script>{{end}}
 </main>`))

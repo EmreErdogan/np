@@ -41,6 +41,10 @@ np view todo                # rendered in the terminal
 np new config.json          # non-markdown notes keep their extension
 np search milk              # name and content, case-insensitive
 np edit todo
+np add todo "buy milk"      # append without opening the file
+np add todo                 # ...from an empty editor buffer
+pbpaste | np add links      # ...or from stdin
+np add -t journal "call"    # prefix a timestamp
 np log todo                 # history with vector clocks
 np show todo 2              # print version 2
 np rm todo                  # deletion syncs as a tombstone
@@ -65,6 +69,13 @@ without an extension is markdown and stored as `name.md`; names with a short
 extension such as `config.json` or `deploy.sh` are stored as-is and shown as
 highlighted code by `np view` and the web UI. Edit the files with anything;
 np notices external changes on the next command.
+
+### Appending
+
+`np add` puts text at the end of a note and creates the note if needed. A
+blank line is inserted before the addition so it renders as its own
+paragraph, unless a list item is added to a list, which keeps the list tight.
+The web UI has the same thing as an "add a line" box under every note.
 
 ## Web UI
 
