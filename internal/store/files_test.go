@@ -272,3 +272,23 @@ func TestFileSize(t *testing.T) {
 		t.Fatal(FileSize(512), FileSize(2048), FileSize(3<<20))
 	}
 }
+
+func TestFileConcurrentIdenticalContent(t *testing.T) {
+	// The same bytes reached a and b by different routes (e.g. a copied the
+	// file in by hand while b pulled it): clocks concurrent, hashes equal.
+	a, b := open(t, "a"), open(t, "b")
+	put(t, a, "same.png", "bytes")
+	put(t, b, "same.png", "bytes")
+	if r := send(t, a, b, "same.png", true); r != Unchanged {
+		t.Fatal(r)
+	}
+	if len(b.Files(false)) != 1 {
+		t.Fatal("no conflict copy expected")
+	}
+	if r := send(t, b, a, "same.png", true); r != Accepted { // b's merged clock dominates
+		t.Fatal(r)
+	}
+	if clock.Compare(a.File("same.png").Clock, b.File("same.png").Clock) != clock.Equal {
+		t.Fatal("clocks should converge")
+	}
+}

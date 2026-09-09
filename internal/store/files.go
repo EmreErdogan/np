@@ -337,6 +337,18 @@ func (s *Store) ApplyFile(remote FileMeta, src io.Reader) (ApplyResult, error) {
 		}
 		return Accepted, s.saveIndex()
 	}
+	// Concurrent with identical content (the same bytes arrived by two
+	// routes): reconcile the clocks, nothing to record.
+	if local.Hash == remote.Hash && local.Deleted == remote.Deleted {
+		local.Clock = clock.Merge(local.Clock, remote.Clock)
+		if !local.Have && !local.Deleted && src != nil {
+			if err := s.installFileContent(local, src); err != nil {
+				return Rejected, err
+			}
+			return Accepted, s.saveIndex()
+		}
+		return Unchanged, s.saveIndex()
+	}
 	// Concurrent: newer mtime wins; the loser's content, when present, is
 	// kept as a conflict copy.
 	remoteWins := remote.ModTime.After(local.ModTime) ||

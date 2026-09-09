@@ -306,3 +306,42 @@ func mustRead(t *testing.T, s *Store, name string) []byte {
 	}
 	return d
 }
+
+func TestScanReloadsIndexWrittenByAnotherProcess(t *testing.T) {
+	// A daemon (d) and a CLI command (c) share one directory. c pulls a note
+	// and a file from a peer; d's next Scan must see the new index, not
+	// re-commit them as its own local changes.
+	dir := t.TempDir()
+	d, err := Open(dir, "joy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Write("mine", []byte("x"))
+	c, err := Open(dir, "joy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := open(t, "m1")
+	peer.Write("n", []byte("from m1"))
+	put(t, peer, "f.png", "img")
+	time.Sleep(5 * time.Millisecond) // distinct index mtimes on coarse filesystems
+	transfer(t, peer, c, "n")
+	send(t, peer, c, "f.png", true)
+
+	ch, err := d.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ch) != 0 {
+		t.Fatalf("daemon re-committed %v", ch)
+	}
+	if m := d.Get("n"); m == nil || m.Clock.String() != "m1:1" || m.ModBy != "m1" {
+		t.Fatalf("note=%+v", m)
+	}
+	if m := d.File("f.png"); m == nil || m.Clock.String() != "m1:1" || m.ModBy != "m1" {
+		t.Fatalf("file=%+v", m)
+	}
+	if m := d.Get("mine"); m == nil {
+		t.Fatal("daemon's own note lost")
+	}
+}

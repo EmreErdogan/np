@@ -91,6 +91,10 @@ type Store struct {
 	Config Config
 	idx    *Index
 	author string // overrides ModBy during scanAs
+	// idxStamp identifies the index.json this process last read or wrote,
+	// so a long-running daemon notices when a CLI command in another
+	// process updated it (see Scan).
+	idxStamp string
 }
 
 // ApplyResult describes what Apply did with an incoming note.
@@ -126,19 +130,9 @@ func Open(dir, node string) (*Store, error) {
 			return nil, err
 		}
 	}
-	s := &Store{Dir: dir, Node: node, idx: &Index{Node: node, Notes: map[string]*Meta{}}}
-	if err := readJSON(filepath.Join(dir, "index.json"), s.idx); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("index.json: %w", err)
-	}
-	if s.idx.Notes == nil {
-		s.idx.Notes = map[string]*Meta{}
-	}
-	if s.idx.Files == nil {
-		s.idx.Files = map[string]*FileMeta{}
-	}
-	if s.idx.Node != node {
-		// Hostname changed; keep going, clocks are keyed by name so old entries stay valid.
-		s.idx.Node = node
+	s := &Store{Dir: dir, Node: node}
+	if err := s.loadIndex(); err != nil {
+		return nil, err
 	}
 	if err := readJSON(filepath.Join(dir, "config.json"), &s.Config); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("config.json: %w", err)
@@ -157,8 +151,50 @@ func (s *Store) SaveConfig() error {
 	return writeJSON(filepath.Join(s.Dir, "config.json"), s.Config)
 }
 
+func (s *Store) indexPath() string { return filepath.Join(s.Dir, "index.json") }
+
+// indexStamp identifies the current index.json on disk ("" when absent).
+func (s *Store) indexStamp() string {
+	st, err := os.Stat(s.indexPath())
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", st.Size(), st.ModTime().UnixNano())
+}
+
+func (s *Store) loadIndex() error {
+	idx := &Index{Node: s.Node, Notes: map[string]*Meta{}, Files: map[string]*FileMeta{}}
+	if err := readJSON(s.indexPath(), idx); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("index.json: %w", err)
+	}
+	if idx.Notes == nil {
+		idx.Notes = map[string]*Meta{}
+	}
+	if idx.Files == nil {
+		idx.Files = map[string]*FileMeta{}
+	}
+	// Hostname changed: keep going, clocks are keyed by name so old entries stay valid.
+	idx.Node = s.Node
+	s.idx = idx
+	s.idxStamp = s.indexStamp()
+	return nil
+}
+
+// reloadIfChanged re-reads index.json when another process wrote it since
+// we last touched it (np sync run from the CLI while the daemon is up).
+func (s *Store) reloadIfChanged() error {
+	if s.indexStamp() == s.idxStamp {
+		return nil
+	}
+	return s.loadIndex()
+}
+
 func (s *Store) saveIndex() error {
-	return writeJSON(filepath.Join(s.Dir, "index.json"), s.idx)
+	if err := writeJSON(s.indexPath(), s.idx); err != nil {
+		return err
+	}
+	s.idxStamp = s.indexStamp()
+	return nil
 }
 
 // extRe matches a short alphanumeric file extension. Anything else after a
@@ -233,6 +269,9 @@ func hashOf(b []byte) string {
 // It returns the names that changed; files under files/ are reported with a
 // "files/" prefix.
 func (s *Store) Scan() ([]string, error) {
+	if err := s.reloadIfChanged(); err != nil {
+		return nil, err
+	}
 	changed, err := s.scanNotes()
 	if err != nil {
 		return nil, err

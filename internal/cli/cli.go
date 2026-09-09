@@ -981,23 +981,32 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 			n.Log.Println("local change:", c)
 		}
 	}
-	syncHub := func() {
-		if n.Store.Config.Hub == "" {
-			return
-		}
+	hubDown := false
+	syncHub := func() bool {
 		p, err := targetPeer(ctx, n, nil)
+		if err == nil {
+			_, err = n.PingPeer(ctx, p)
+		}
 		if err != nil {
-			n.Log.Println("sync:", err)
-			return
+			if !hubDown { // log once, not every tick
+				n.Log.Printf("sync: %v; syncing with online peers directly until it is back", err)
+			}
+			hubDown = true
+			return false
+		}
+		if hubDown {
+			n.Log.Println("sync: hub", p.Name, "is back")
+			hubDown = false
 		}
 		rep, err := n.Sync(ctx, p)
 		if err != nil {
 			n.Log.Println("sync:", err)
-			return
+			return true
 		}
 		if len(rep.Pulled)+len(rep.Pushed)+len(rep.Errors) > 0 {
 			n.Log.Println("sync", rep.Detail())
 		}
+		return true
 	}
 	// syncAll syncs with every online np peer. Fan-outs log everything;
 	// the periodic hub-less mesh sync logs only when something moved.
@@ -1016,10 +1025,10 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 			}
 		}
 	}
+	// With a hub, sync with it; while it is unreachable, fall back to the
+	// online peers directly so two laptops keep converging without it.
 	periodic := func() {
-		if n.Store.Config.Hub != "" {
-			syncHub()
-		} else {
+		if n.Store.Config.Hub == "" || !syncHub() {
 			syncAll("mesh", false)
 		}
 	}
