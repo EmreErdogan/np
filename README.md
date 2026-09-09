@@ -34,7 +34,9 @@ Requires a running Tailscale on every machine.
 np new todo                 # opens $EDITOR; or: echo "buy milk" | np new todo
 np ls                       # with sync state against the hub: synced/ahead/new/behind/conflict
 np ls --local               # skip the hub lookup
-np cat todo
+np cat todo                 # raw content
+np view todo                # rendered in the terminal
+np new config.json          # non-markdown notes keep their extension
 np search milk              # name and content, case-insensitive
 np edit todo
 np log todo                 # history with vector clocks
@@ -56,14 +58,18 @@ hub every edit reaches every machine within a few seconds. Without a hub the
 daemon syncs with every online np peer on each tick instead, so a pure mesh
 converges too.
 
-Notes are markdown files in `~/.np/notes/` (override with `NP_DIR`). Edit
-them with anything; np notices external changes on the next command.
+Notes are plain files in `~/.np/notes/` (override with `NP_DIR`). A name
+without an extension is markdown and stored as `name.md`; names with a short
+extension such as `config.json` or `deploy.sh` are stored as-is and shown as
+highlighted code by `np view` and the web UI. Edit the files with anything;
+np notices external changes on the next command.
 
 ## Web UI
 
 The daemon serves a small phone-friendly page at `http://<tailscale-ip>:7373/`
 (the URL is shown by `np status`). Open it from any device on the tailnet,
 such as a phone running Tailscale, to read, edit, create and delete notes.
+Markdown notes are rendered; other file types are shown as highlighted code.
 Edits are committed like local edits and fanned out to peers immediately.
 Access uses the same tailnet identity rules as sync.
 

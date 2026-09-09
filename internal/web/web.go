@@ -5,7 +5,6 @@
 package web
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -13,11 +12,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/extension"
-	"github.com/yuin/goldmark/parser"
-
 	"github.com/EmreErdogan/np/internal/proto"
+	"github.com/EmreErdogan/np/internal/render"
 	"github.com/EmreErdogan/np/internal/store"
 	"github.com/EmreErdogan/np/internal/ts"
 )
@@ -36,36 +32,21 @@ func Mount(n *proto.Node) func(mux *http.ServeMux) {
 
 type ui struct{ n *proto.Node }
 
-// md renders GitHub-flavoured markdown. Raw HTML in notes is escaped, not
-// rendered, so a note cannot inject script into the page.
-var md = goldmark.New(
-	goldmark.WithExtensions(extension.GFM, extension.Typographer),
-	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
-)
-
-func renderMarkdown(src []byte) template.HTML {
-	var buf bytes.Buffer
-	if err := md.Convert(src, &buf); err != nil {
-		return template.HTML("<pre>" + template.HTMLEscapeString(string(src)) + "</pre>")
-	}
-	return template.HTML(buf.String())
-}
-
 func (u *ui) list(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	u.n.Lock()
 	u.n.Store.Scan()
 	notes := u.n.Store.List(false)
 	u.n.Unlock()
-	render(w, listTmpl, map[string]any{"Node": u.n.Self.Name, "Notes": notes, "Who": peer.Name})
+	page(w, listTmpl, map[string]any{"Node": u.n.Self.Name, "Notes": notes, "Who": peer.Name})
 }
 
 // create renders an empty editor; the name is chosen on save.
 func (u *ui) create(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
-	render(w, noteTmpl, map[string]any{"Node": u.n.Self.Name, "Name": "", "Content": "", "Hash": "", "New": true, "Edit": true})
+	page(w, noteTmpl, map[string]any{"Node": u.n.Self.Name, "Name": "", "Content": "", "Hash": "", "New": true, "Edit": true})
 }
 
 func (u *ui) note(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
-	name := r.PathValue("name")
+	name := store.Canon(r.PathValue("name"))
 	if err := store.ValidName(name); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -88,9 +69,9 @@ func (u *ui) note(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
 		"Hash": hash, "New": hash == "", "Edit": edit,
 	}
 	if !edit {
-		data["HTML"] = renderMarkdown(content)
+		data["HTML"] = render.HTML(name, content)
 	}
-	render(w, noteTmpl, data)
+	page(w, noteTmpl, data)
 }
 
 type saveReq struct {
@@ -113,7 +94,7 @@ func (u *ui) save(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	req.Name = strings.TrimSpace(req.Name)
+	req.Name = store.Canon(strings.TrimSpace(req.Name))
 	if err := store.ValidName(req.Name); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -153,6 +134,7 @@ func (u *ui) del(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	req.Name = store.Canon(req.Name)
 	u.n.Lock()
 	defer u.n.Unlock()
 	if err := u.n.Store.DeleteBy(req.Name, peer.Name); err != nil {
@@ -169,14 +151,14 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-func render(w http.ResponseWriter, t *template.Template, data any) {
+func page(w http.ResponseWriter, t *template.Template, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := t.Execute(w, data); err != nil && !errors.Is(err, http.ErrHandlerTimeout) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
-const css = `
+var css = `
 :root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fafaf7;--mute:#777;--line:#e2e0da;--acc:#2f6f4f;--danger:#b23b3b}
 @media(prefers-color-scheme:dark){:root{--fg:#ececea;--bg:#161616;--mute:#999;--line:#2c2c2c;--acc:#7fc8a0;--danger:#e07a7a}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 -apple-system,system-ui,sans-serif}
@@ -195,7 +177,8 @@ textarea{min-height:60vh;font-family:ui-monospace,Menlo,monospace;font-size:15px
 .md blockquote{margin:0 0 12px;padding:4px 14px;border-left:3px solid var(--line);color:var(--mute)}.md a{color:var(--acc)}
 .md table{border-collapse:collapse;margin:0 0 12px;display:block;overflow-x:auto}.md th,.md td{border:1px solid var(--line);padding:6px 10px;text-align:left}
 .md img{max-width:100%}.md hr{border:0;border-top:1px solid var(--line);margin:16px 0}
-`
+.md .chroma{padding:12px;border-radius:8px;overflow-x:auto;font-family:ui-monospace,Menlo,monospace;font-size:14px}
+` + render.CSS()
 
 var listTmpl = template.Must(template.New("list").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>np · {{.Node}}</title><style>` + css + `</style><main>
@@ -210,7 +193,7 @@ var noteTmpl = template.Must(template.New("note").Parse(`<!doctype html><meta ch
 <header><h1><a href="/">np</a></h1><small>{{.Node}}</small><span class=sp></span>
 {{if not .Edit}}<a class=btn href="?edit">Edit</a>{{end}}</header>
 {{if .Edit}}
-<input id=name value="{{.Name}}" {{if not .New}}readonly{{else}}autofocus{{end}} placeholder="note name">
+<input id=name value="{{.Name}}" {{if not .New}}readonly{{else}}autofocus{{end}} placeholder="note name (add .json, .sh, .yaml… for non-markdown)">
 <div class=row></div>
 <textarea id=c>{{.Content}}</textarea>
 <div class=row><button class=pri onclick="save()">Save</button>{{if not .New}}<a class=btn href="/n/{{.Name}}">Cancel</a><span class=sp></span><button class=danger onclick="del()">Delete</button>{{end}}</div>

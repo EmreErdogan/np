@@ -120,3 +120,18 @@ func TestMarkdownRender(t *testing.T) {
 		t.Error("edit view should contain raw markdown")
 	}
 }
+
+func TestCodeRender(t *testing.T) {
+	n, srv := setup(t)
+	n.Store.Write("cfg.json", []byte(`{"a": 1}`))
+	resp, _ := http.Get(srv.URL + "/n/cfg.json")
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `class="chroma"`) || strings.Contains(string(body), "<p>") {
+		t.Errorf("json should render as highlighted code, got: %.300s", body)
+	}
+	// "todo.md" in a URL is the same note as "todo".
+	n.Store.Write("todo", []byte("x"))
+	if resp, _ = http.Get(srv.URL + "/n/todo.md"); resp.StatusCode != 200 {
+		t.Fatal(resp.StatusCode)
+	}
+}

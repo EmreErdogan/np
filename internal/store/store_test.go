@@ -154,3 +154,30 @@ func TestValidName(t *testing.T) {
 		}
 	}
 }
+
+func TestExtensions(t *testing.T) {
+	cases := map[string]string{
+		"todo": "todo.md", "cfg.json": "cfg.json", "deploy.sh": "deploy.sh",
+		"a.conflict-laptop-20260908-202227": "a.conflict-laptop-20260908-202227.md",
+		"work/notes.v2":                     "work/notes.v2", "dir.name/todo": "dir.name/todo.md",
+	}
+	for name, want := range cases {
+		if got := FileName(name); got != want {
+			t.Errorf("FileName(%q)=%q want %q", name, got, want)
+		}
+	}
+	if Ext("cfg.JSON") != "json" || Ext("todo") != "" || Canon("todo.md") != "todo" {
+		t.Fatal("ext/canon")
+	}
+	s := open(t, "a")
+	os.WriteFile(filepath.Join(s.Dir, "notes", "cfg.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(s.Dir, "notes", "plain.md"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(s.Dir, "notes", "README"), []byte("ignored"), 0o644)
+	changed, _ := s.Scan()
+	if len(changed) != 2 || changed[0] != "cfg.json" || changed[1] != "plain" {
+		t.Fatalf("changed=%v", changed)
+	}
+	if got, _ := s.Read("cfg.json"); string(got) != "{}" {
+		t.Fatal(string(got))
+	}
+}

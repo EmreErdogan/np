@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/EmreErdogan/np/internal/proto"
+	"github.com/EmreErdogan/np/internal/render"
 	"github.com/EmreErdogan/np/internal/service"
 	"github.com/EmreErdogan/np/internal/store"
 	"github.com/EmreErdogan/np/internal/ts"
@@ -33,6 +34,7 @@ Notes:
   np edit <name>         edit a note
   np ls [--local]        list notes with sync state against the hub
   np cat <name>          print a note
+  np view <name>         render a note in the terminal (markdown or code)
   np search <text>       find notes whose name or content contains text
   np rm <name>           delete a note (tombstone syncs to peers)
   np log <name>          version history
@@ -55,8 +57,10 @@ for reading and editing notes from any device on the tailnet.
 Service (runs "np daemon" in the background at login):
   np service install | uninstall | status
 
-Notes live in ~/.np/notes as plain markdown (override with NP_DIR).
-Any editor works; np records external edits on the next command.
+Notes live in ~/.np/notes as plain files (override with NP_DIR). A name
+without an extension is markdown ("todo" -> todo.md); names like config.json
+or deploy.sh are kept as-is and shown as code. Any editor works; np records
+external edits on the next command.
 `
 
 // Version is set at build time via -ldflags "-X .../cli.Version=v1.2.3".
@@ -103,6 +107,8 @@ func run(cmd string, args []string) error {
 		return cmdSearch(n, args)
 	case "cat":
 		return cmdCat(n, args)
+	case "view", "show-rendered":
+		return cmdView(n, args)
 	case "rm", "delete":
 		return cmdRm(n, args)
 	case "log":
@@ -149,6 +155,9 @@ func openNode(ctx context.Context) (*proto.Node, error) {
 func oneArg(args []string, what string) (string, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("expected %s", what)
+	}
+	if what == "<name>" {
+		return store.Canon(args[0]), nil
 	}
 	return args[0], nil
 }
@@ -309,6 +318,27 @@ func cmdCat(n *proto.Node, args []string) error {
 	return err
 }
 
+func cmdView(n *proto.Node, args []string) error {
+	name, err := oneArg(args, "<name>")
+	if err != nil {
+		return err
+	}
+	data, err := n.Store.Read(name)
+	if err != nil {
+		return err
+	}
+	if fi, _ := os.Stdout.Stat(); fi != nil && fi.Mode()&os.ModeCharDevice == 0 {
+		_, err = os.Stdout.Write(data) // piped: no escape codes
+		return err
+	}
+	width := 100
+	if c, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && c > 20 {
+		width = c
+	}
+	dark := os.Getenv("NP_THEME") != "light"
+	return render.Terminal(os.Stdout, name, data, width, dark)
+}
+
 func cmdRm(n *proto.Node, args []string) error {
 	name, err := oneArg(args, "<name>")
 	if err != nil {
@@ -343,9 +373,10 @@ func cmdShow(n *proto.Node, args []string) error {
 	if len(args) != 2 {
 		return errors.New("expected <name> <seq>")
 	}
-	m := n.Store.Get(args[0])
+	name := store.Canon(args[0])
+	m := n.Store.Get(name)
 	if m == nil {
-		return fmt.Errorf("no note %q", args[0])
+		return fmt.Errorf("no note %q", name)
 	}
 	seq, err := strconv.Atoi(args[1])
 	if err != nil || seq < 1 || seq > len(m.History) {
@@ -355,7 +386,7 @@ func cmdShow(n *proto.Node, args []string) error {
 	if v.Deleted {
 		return errors.New("that version is a deletion")
 	}
-	data, err := n.Store.Snapshot(args[0], v.Hash)
+	data, err := n.Store.Snapshot(name, v.Hash)
 	if err != nil {
 		return err
 	}

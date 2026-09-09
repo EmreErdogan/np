@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -137,13 +138,40 @@ func (s *Store) saveIndex() error {
 	return writeJSON(filepath.Join(s.Dir, "index.json"), s.idx)
 }
 
+// extRe matches a short alphanumeric file extension. Anything else after a
+// dot (like ".conflict-laptop-20260908") is part of the name, not a type.
+var extRe = regexp.MustCompile(`\.([A-Za-z0-9]{1,8})$`)
+
+// Ext returns the note's file extension without the dot, or "" for markdown
+// notes (which are stored with an implicit .md).
+func Ext(name string) string {
+	m := extRe.FindStringSubmatch(filepath.Base(name))
+	if m == nil {
+		return ""
+	}
+	return strings.ToLower(m[1])
+}
+
+// Canon normalises user input: "todo.md" and "todo" are the same note.
+func Canon(name string) string {
+	return strings.TrimSuffix(name, noteExt)
+}
+
+// FileName is the path of a note relative to the notes directory.
+func FileName(name string) string {
+	if Ext(name) != "" {
+		return name
+	}
+	return name + noteExt
+}
+
 // ValidName rejects names that could escape the notes directory.
 func ValidName(name string) error {
 	if name == "" {
 		return errors.New("empty note name")
 	}
 	if strings.HasSuffix(name, noteExt) {
-		return fmt.Errorf("note name should not end with %s", noteExt)
+		return fmt.Errorf("note name should not end with %s (markdown is the default)", noteExt)
 	}
 	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
 		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, ".") {
@@ -157,7 +185,7 @@ func ValidName(name string) error {
 }
 
 func (s *Store) notePath(name string) string {
-	return filepath.Join(s.Dir, "notes", filepath.FromSlash(name)+noteExt)
+	return filepath.Join(s.Dir, "notes", filepath.FromSlash(FileName(name)))
 }
 
 func (s *Store) snapshotPath(name, hash string) string {
@@ -186,12 +214,14 @@ func (s *Store) Scan() ([]string, error) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(p, noteExt) || strings.HasPrefix(d.Name(), ".") {
+		if strings.HasPrefix(d.Name(), ".") || strings.HasSuffix(d.Name(), ".tmp") {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
-		name := filepath.ToSlash(strings.TrimSuffix(rel, noteExt))
-		if ValidName(name) != nil {
+		name := Canon(filepath.ToSlash(rel))
+		// Only files whose name round-trips are notes: "x.md" -> "x",
+		// "cfg.json" -> "cfg.json"; a bare "README" is ignored.
+		if ValidName(name) != nil || FileName(name) != filepath.ToSlash(rel) {
 			return nil
 		}
 		seen[name] = true
