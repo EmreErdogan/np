@@ -2,6 +2,7 @@
 //
 //	<dir>/notes/<name>.md     working files, safe to edit with any editor
 //	<dir>/history/<name>/<hash>.md  immutable snapshots of every version
+//	<dir>/files/<name>        arbitrary files, no history, fetched lazily (files.go)
 //	<dir>/index.json          per-note metadata (vector clock, hash, tombstones)
 //	<dir>/config.json         hub, port, allowed logins
 package store
@@ -49,8 +50,9 @@ type Meta struct {
 
 // Index is index.json.
 type Index struct {
-	Node  string           `json:"node"`
-	Notes map[string]*Meta `json:"notes"`
+	Node  string               `json:"node"`
+	Notes map[string]*Meta     `json:"notes"`
+	Files map[string]*FileMeta `json:"files,omitempty"`
 }
 
 // Config is config.json.
@@ -59,6 +61,22 @@ type Config struct {
 	Port     int      `json:"port,omitempty"`
 	Interval int      `json:"interval_seconds,omitempty"`
 	Allow    []string `json:"allow,omitempty"` // extra tailnet logins allowed to sync
+	// AutoFetch is the largest file whose content is pulled without being
+	// asked; 0 means DefaultAutoFetch, negative disables automatic fetching.
+	AutoFetch int64 `json:"auto_fetch_bytes,omitempty"`
+	// KeepAll makes this node pull every file's content (hub / archive role).
+	KeepAll bool `json:"keep_all,omitempty"`
+}
+
+// AutoFetchLimit is the effective auto-fetch threshold in bytes (-1 = never).
+func (c Config) AutoFetchLimit() int64 {
+	switch {
+	case c.AutoFetch == 0:
+		return DefaultAutoFetch
+	case c.AutoFetch < 0:
+		return -1
+	}
+	return c.AutoFetch
 }
 
 const (
@@ -103,7 +121,7 @@ func Open(dir, node string) (*Store, error) {
 	if node == "" {
 		return nil, errors.New("store: empty node name")
 	}
-	for _, sub := range []string{"notes", "history"} {
+	for _, sub := range []string{"notes", "history", "files"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
 			return nil, err
 		}
@@ -114,6 +132,9 @@ func Open(dir, node string) (*Store, error) {
 	}
 	if s.idx.Notes == nil {
 		s.idx.Notes = map[string]*Meta{}
+	}
+	if s.idx.Files == nil {
+		s.idx.Files = map[string]*FileMeta{}
 	}
 	if s.idx.Node != node {
 		// Hostname changed; keep going, clocks are keyed by name so old entries stay valid.
@@ -175,13 +196,21 @@ func ValidName(name string) error {
 	if strings.HasSuffix(name, noteExt) {
 		return fmt.Errorf("note name should not end with %s (markdown is the default)", noteExt)
 	}
+	if err := validSegments(name); err != nil {
+		return fmt.Errorf("invalid note name %q", name)
+	}
+	return nil
+}
+
+// validSegments rejects paths with empty, dot, dot-dot or dot-prefixed parts.
+func validSegments(name string) error {
+	if filepath.IsAbs(name) {
+		return errors.New("absolute path")
+	}
 	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
 		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, ".") {
-			return fmt.Errorf("invalid note name %q", name)
+			return errors.New("bad segment")
 		}
-	}
-	if filepath.IsAbs(name) {
-		return fmt.Errorf("invalid note name %q", name)
 	}
 	return nil
 }
@@ -201,8 +230,29 @@ func hashOf(b []byte) string {
 
 // Scan compares the working files with the index and records every change
 // made outside np (editor, rm, new files) as a new version by this node.
-// It returns the names that changed.
+// It returns the names that changed; files under files/ are reported with a
+// "files/" prefix.
 func (s *Store) Scan() ([]string, error) {
+	changed, err := s.scanNotes()
+	if err != nil {
+		return nil, err
+	}
+	files, err := s.scanFiles()
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range files {
+		changed = append(changed, "files/"+f)
+	}
+	if len(files) > 0 {
+		if err := s.saveIndex(); err != nil {
+			return nil, err
+		}
+	}
+	return changed, nil
+}
+
+func (s *Store) scanNotes() ([]string, error) {
 	root := filepath.Join(s.Dir, "notes")
 	seen := map[string]bool{}
 	var changed []string

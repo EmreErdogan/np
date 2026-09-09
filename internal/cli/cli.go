@@ -45,6 +45,18 @@ Notes:
   np log <name>          version history
   np show <name> <seq>   print a historical version
 
+Files (any type; synced lazily):
+  np put <path> [name]   copy a file in (name defaults to the file's base name;
+                         use dir/name to place it in a folder)
+  np get <name> [-o <path>]
+                         fetch a file's content from the hub or a peer that has
+                         it; -o also copies it to path
+  np drop <name>         remove the local copy but keep knowing about the file
+  np rm <name>           delete a file (when no note has that name)
+  Files are listed at the end of np ls. Every machine learns about every
+  file; content below auto_fetch_bytes (2 MB, config) follows automatically,
+  larger files only on np get, in the web UI, or on nodes with keep_all.
+
 Sync:
   np peers               tailnet machines and whether they run np
   np hub [<peer>|none]   show or set the default sync peer
@@ -62,7 +74,7 @@ for reading and editing notes from any device on the tailnet.
 Service (runs "np daemon" in the background at login):
   np service install | uninstall | status
 
-Notes live in ~/.np/notes as plain files (override with NP_DIR). A name
+Notes live in ~/.np/notes and files in ~/.np/files (override with NP_DIR). A name
 without an extension is markdown ("todo" -> todo.md); names like config.json
 or deploy.sh are kept as-is and shown as code. Any editor works; np records
 external edits on the next command.
@@ -118,6 +130,12 @@ func run(cmd string, args []string) error {
 		return cmdView(n, args)
 	case "rm", "delete":
 		return cmdRm(n, args)
+	case "put":
+		return cmdPut(n, args)
+	case "get":
+		return cmdGet(ctx, n, args)
+	case "drop":
+		return cmdDrop(n, args)
 	case "log":
 		return cmdLog(n, args)
 	case "show":
@@ -216,21 +234,25 @@ func cmdEdit(n *proto.Node, args []string, create bool) error {
 
 // hubStates fetches the hub's index and classifies local notes against it.
 // Returns nil (and a reason) when there is no hub or it cannot be reached.
-func hubStates(ctx context.Context, n *proto.Node) (map[string]proto.SyncState, string) {
+func hubStates(ctx context.Context, n *proto.Node) (notes, files map[string]proto.SyncState, reason string) {
 	if n.Store.Config.Hub == "" {
-		return nil, "no hub set"
+		return nil, nil, "no hub set"
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	p, err := targetPeer(ctx, n, nil)
 	if err != nil {
-		return nil, err.Error()
+		return nil, nil, err.Error()
 	}
 	remote, err := n.RemoteIndex(ctx, p)
 	if err != nil {
-		return nil, fmt.Sprintf("hub %s unreachable", p.Name)
+		return nil, nil, fmt.Sprintf("hub %s unreachable", p.Name)
 	}
-	return proto.Compare(n.Store.List(true), remote), ""
+	remoteFiles, err := n.RemoteFiles(ctx, p)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("hub %s unreachable", p.Name)
+	}
+	return proto.Compare(n.Store.List(true), remote), proto.CompareFiles(n.Store.Files(true), remoteFiles), ""
 }
 
 // stdinPiped reports whether stdin carries data rather than a terminal.
@@ -325,10 +347,10 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 			prefix = strings.TrimSuffix(a, "/")
 		}
 	}
-	var states map[string]proto.SyncState
+	var states, fileStates map[string]proto.SyncState
 	reason := "skipped"
 	if !local {
-		states, reason = hubStates(ctx, n)
+		states, fileStates, reason = hubStates(ctx, n)
 	}
 	// Build the row set: local notes plus hub-only notes.
 	type row struct {
@@ -381,10 +403,75 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
+	if err := listFiles(n, prefix, flat, fileStates, states != nil || local); err != nil {
+		return err
+	}
 	if states == nil && reason != "skipped" {
 		fmt.Fprintln(os.Stderr, "sync state unavailable:", reason)
 	}
 	return nil
+}
+
+// listFiles prints the files block of np ls: name, size, date, author, and
+// the hub state ("not fetched" when only the metadata is here).
+func listFiles(n *proto.Node, prefix string, flat bool, states map[string]proto.SyncState, haveStates bool) error {
+	type row struct {
+		name, size, when, by, state string
+	}
+	var rows []row
+	listed := map[string]bool{}
+	for _, m := range n.Store.Files(false) {
+		listed[m.Name] = true
+		st := ""
+		if states != nil {
+			st = string(states[m.Name])
+		}
+		if !m.Have {
+			if st != "" {
+				st += ", "
+			}
+			st += "not fetched"
+		}
+		rows = append(rows, row{m.Name, store.FileSize(m.Size), m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy, st})
+	}
+	for name, st := range states {
+		if !listed[name] && st == proto.Behind {
+			rows = append(rows, row{name, "", "", "", "behind (hub only)"})
+		}
+	}
+	if prefix != "" {
+		var kept []row
+		for _, r := range rows {
+			if r.name == prefix || strings.HasPrefix(r.name, prefix+"/") {
+				kept = append(kept, r)
+			}
+		}
+		rows = kept
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	sort.Slice(rows, func(i, j int) bool { return treeLess(rows[i].name, rows[j].name) })
+	fmt.Println()
+	fmt.Println("files:")
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	lastDir := ""
+	for _, r := range rows {
+		name, indent := r.name, ""
+		if !flat {
+			dir := ""
+			if i := strings.LastIndex(r.name, "/"); i >= 0 {
+				dir, name = r.name[:i], r.name[i+1:]
+			}
+			if dir != lastDir {
+				printDirHeaders(tw, lastDir, dir)
+				lastDir = dir
+			}
+			indent = strings.Repeat("  ", strings.Count(dir, "/")+boolInt(dir != ""))
+		}
+		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\t%s\n", indent, name, r.size, r.when, r.by, r.state)
+	}
+	return tw.Flush()
 }
 
 func boolInt(b bool) int {
@@ -501,11 +588,116 @@ func cmdView(n *proto.Node, args []string) error {
 }
 
 func cmdRm(n *proto.Node, args []string) error {
-	name, err := oneArg(args, "<name>")
+	if len(args) != 1 {
+		return errors.New("expected <name>")
+	}
+	n.Store.Scan()
+	name := store.Canon(args[0])
+	if m := n.Store.Get(name); m != nil && !m.Deleted {
+		return n.Store.Delete(name)
+	}
+	if m := n.Store.File(args[0]); m != nil && !m.Deleted {
+		return n.Store.DeleteFile(args[0], n.Self.Name)
+	}
+	return fmt.Errorf("no note or file %q", args[0])
+}
+
+func cmdPut(n *proto.Node, args []string) error {
+	if len(args) < 1 || len(args) > 2 {
+		return errors.New("expected <path> [name]")
+	}
+	src, err := os.Open(args[0])
 	if err != nil {
 		return err
 	}
-	return n.Store.Delete(name)
+	defer src.Close()
+	name := filepath.Base(args[0])
+	if len(args) == 2 {
+		if strings.HasSuffix(args[1], "/") { // a folder: keep the base name
+			name = strings.Trim(args[1], "/") + "/" + name
+		} else {
+			name = strings.Trim(args[1], "/")
+		}
+	}
+	if err := store.ValidFileName(name); err != nil {
+		return err
+	}
+	if err := n.Store.PutFile(name, src, n.Self.Name); err != nil {
+		return err
+	}
+	m := n.Store.File(name)
+	fmt.Printf("%s (%s)\n", name, store.FileSize(m.Size))
+	return nil
+}
+
+func cmdGet(ctx context.Context, n *proto.Node, args []string) error {
+	name, out := "", ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "-o" && i+1 < len(args):
+			out = args[i+1]
+			i++
+		case name == "":
+			name = args[i]
+		default:
+			return errors.New("expected <name> [-o <path>]")
+		}
+	}
+	if name == "" {
+		return errors.New("expected <name> [-o <path>]")
+	}
+	n.Store.Scan()
+	m := n.Store.File(name)
+	if m == nil || m.Deleted {
+		return fmt.Errorf("no file %q", name)
+	}
+	if !m.Have {
+		from, err := n.FetchFile(ctx, name)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("fetched %s (%s) from %s\n", name, store.FileSize(m.Size), from.Name)
+	}
+	if out == "" {
+		if m.Have {
+			fmt.Println(filepath.Join(n.Store.Dir, "files", filepath.FromSlash(name)))
+		}
+		return nil
+	}
+	if st, err := os.Stat(out); err == nil && st.IsDir() {
+		out = filepath.Join(out, filepath.Base(name))
+	}
+	f, err := n.Store.OpenFile(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	dst, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, f); err != nil {
+		dst.Close()
+		return err
+	}
+	return dst.Close()
+}
+
+func cmdDrop(n *proto.Node, args []string) error {
+	name, err := oneArg(args, "<file>")
+	if err != nil {
+		return err
+	}
+	n.Store.Scan()
+	m := n.Store.File(name)
+	if m == nil || m.Deleted {
+		return fmt.Errorf("no file %q", name)
+	}
+	if !m.Have {
+		fmt.Println(name, "is not on this machine")
+		return nil
+	}
+	return n.Store.DropFile(name)
 }
 
 func cmdLog(n *proto.Node, args []string) error {
@@ -682,6 +874,9 @@ func printReport(rep proto.SyncReport) {
 	for _, s := range rep.Pushed {
 		fmt.Println("  ->", s)
 	}
+	for _, s := range rep.NotFetched {
+		fmt.Println("  .. not fetched:", s, "(np get to download)")
+	}
 	for _, s := range rep.Merged {
 		fmt.Println("  == merged:", s, "(both edits combined)")
 	}
@@ -826,9 +1021,17 @@ func cmdStatus(ctx context.Context, n *proto.Node) error {
 	if hub == "" {
 		hub = "(none)"
 	}
-	fmt.Printf("node:   %s (%s)\nlogin:  %s\ndir:    %s\nhub:    %s\nweb:    http://%s:%d/\nnotes:  %d\n",
-		n.Self.Name, n.Self.IP, n.Self.Login, n.Store.Dir, hub, n.Self.IP, n.Store.Config.Port, len(n.Store.List(false)))
-	states, reason := hubStates(ctx, n)
+	files := n.Store.Files(false)
+	stubs := 0
+	for _, m := range files {
+		if !m.Have {
+			stubs++
+		}
+	}
+	fmt.Printf("node:   %s (%s)\nlogin:  %s\ndir:    %s\nhub:    %s\nweb:    http://%s:%d/\nnotes:  %d\nfiles:  %d (%d not fetched; auto-fetch up to %s%s)\n",
+		n.Self.Name, n.Self.IP, n.Self.Login, n.Store.Dir, hub, n.Self.IP, n.Store.Config.Port, len(n.Store.List(false)),
+		len(files), stubs, autoFetchText(n.Store.Config), keepAllText(n.Store.Config))
+	states, _, reason := hubStates(ctx, n)
 	if states == nil {
 		fmt.Printf("sync:   %s\n", reason)
 		return nil
@@ -840,6 +1043,20 @@ func cmdStatus(ctx context.Context, n *proto.Node) error {
 	fmt.Printf("sync:   %d synced, %d ahead, %d new, %d behind, %d conflict\n",
 		counts[proto.Synced], counts[proto.Ahead], counts[proto.New], counts[proto.Behind], counts[proto.Diverged])
 	return nil
+}
+
+func autoFetchText(c store.Config) string {
+	if c.AutoFetchLimit() < 0 {
+		return "never"
+	}
+	return store.FileSize(c.AutoFetchLimit())
+}
+
+func keepAllText(c store.Config) string {
+	if c.KeepAll {
+		return ", keep_all"
+	}
+	return ""
 }
 
 func cmdUpgrade(args []string) error {

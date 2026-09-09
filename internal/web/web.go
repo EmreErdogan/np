@@ -32,6 +32,7 @@ func Mount(n *proto.Node) func(mux *http.ServeMux) {
 		mux.HandleFunc("POST /web/save", n.Auth(w.save))
 		mux.HandleFunc("POST /web/delete", n.Auth(w.del))
 		mux.HandleFunc("POST /web/append", n.Auth(w.appendNote))
+		mountFiles(w, mux)
 	}
 }
 
@@ -47,6 +48,7 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	u.n.Lock()
 	u.n.Store.Scan()
 	notes := u.n.Store.List(false)
+	files := fileRows(u.n.Store.Files(false))
 	u.n.Unlock()
 	byDir := map[string][]*store.Meta{}
 	var dirs []string
@@ -65,7 +67,7 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	for _, d := range dirs {
 		groups = append(groups, group{Dir: d, Notes: byDir[d]})
 	}
-	page(w, listTmpl, map[string]any{"Node": u.n.Self.Name, "Groups": groups, "Empty": len(notes) == 0, "Who": peer.Name})
+	page(w, listTmpl, map[string]any{"Node": u.n.Self.Name, "Groups": groups, "Files": files, "Empty": len(notes) == 0, "Who": peer.Name})
 }
 
 // create renders an empty editor; the name is chosen on save.
@@ -305,6 +307,7 @@ textarea{min-height:60vh;font-family:ui-monospace,Menlo,monospace;font-size:15px
 .md img{max-width:100%}.md hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 .ver{display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid var(--line);align-items:baseline}.ver a{color:inherit;text-decoration:none;flex:1}.ver small{color:var(--mute)}
 .banner{background:rgba(127,127,127,.12);border-radius:8px;padding:10px 14px;margin-bottom:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.banner .sp{flex:1}
+.prev{max-width:100%;border-radius:8px;display:block}li a .stub{color:var(--mute);font-size:13px}.up{margin-top:8px;display:flex;gap:8px;align-items:center}.up input[type=file]{flex:1;padding:6px}
 .md .chroma{padding:12px;border-radius:8px;overflow-x:auto;font-family:ui-monospace,Menlo,monospace;font-size:14px}
 ` + render.CSS()
 
@@ -317,8 +320,12 @@ var listTmpl = template.Must(template.New("list").Funcs(template.FuncMap{"base":
 <title>np · {{.Node}}</title><style>` + css + `</style><main>
 <header><h1>np</h1><small>{{.Node}} · you: {{.Who}}</small><span class=sp></span><a class=btn href="/new">New</a></header>
 <input id=q placeholder="filter" autofocus oninput="f()">
-<div id=l>{{range .Groups}}{{if .Dir}}<h3 class=dir>{{.Dir}}/</h3>{{end}}<ul>{{range .Notes}}<li data-n="{{.Name}}"><a href="/n/{{.Name}}"><span>{{base .Name}}</span><small>{{.ModBy}} · {{.ModTime.Local.Format "Jan 2 15:04"}}</small></a></li>{{end}}</ul>{{end}}{{if .Empty}}<p class=empty>no notes yet</p>{{end}}</div>
-<script>function f(){var q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#l li').forEach(function(li){li.style.display=li.dataset.n.toLowerCase().includes(q)?'':'none'});document.querySelectorAll('#l h3').forEach(function(h){var ul=h.nextElementSibling;h.style.display=[].some.call(ul.children,function(li){return li.style.display!=='none'})?'':'none'})}</script>
+<div id=l>{{range .Groups}}{{if .Dir}}<h3 class=dir>{{.Dir}}/</h3>{{end}}<ul>{{range .Notes}}<li data-n="{{.Name}}"><a href="/n/{{.Name}}"><span>{{base .Name}}</span><small>{{.ModBy}} · {{.ModTime.Local.Format "Jan 2 15:04"}}</small></a></li>{{end}}</ul>{{end}}{{if .Empty}}<p class=empty>no notes yet</p>{{end}}
+{{if .Files}}<h3 class=dir>files</h3><ul>{{range .Files}}<li data-n="{{.Name}}"><a href="/f/{{.Name}}"><span>{{.Name}}{{if not .Have}} <span class=stub>not fetched</span>{{end}}</span><small>{{.SizeText}} · {{.ModBy}} · {{.ModTime.Local.Format "Jan 2 15:04"}}</small></a></li>{{end}}</ul>{{end}}</div>
+<form class=up onsubmit="return up()"><input type=file id=uf><button class=pri>Upload</button></form><div id=msg></div>
+<script>function up(){var f=document.getElementById('uf').files[0];if(!f)return false;var fd=new FormData();fd.append('file',f,f.name);var m=document.getElementById('msg');m.textContent='uploading…';
+fetch('/web/upload',{method:'POST',headers:{'X-Requested-With':'np'},body:fd}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t)})}).then(function(j){location.href='/f/'+j.name}).catch(function(e){m.textContent=e.message});return false}
+function f(){var q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#l li').forEach(function(li){li.style.display=li.dataset.n.toLowerCase().includes(q)?'':'none'});document.querySelectorAll('#l h3').forEach(function(h){var ul=h.nextElementSibling;h.style.display=[].some.call(ul.children,function(li){return li.style.display!=='none'})?'':'none'})}</script>
 </main>`))
 
 var noteTmpl = template.Must(template.New("note").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">

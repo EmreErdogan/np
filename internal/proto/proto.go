@@ -176,6 +176,7 @@ func (n *Node) Handler() http.Handler {
 		}
 		writeJSON(w, Apply{Result: res})
 	}))
+	n.mountFiles(mux)
 	for _, m := range n.Mount {
 		m(mux)
 	}
@@ -238,6 +239,10 @@ func (n *Node) Serve(ctx context.Context) error {
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
+// errNotFound wraps 404 responses so callers can tell a missing route (an
+// older np on the peer) from other failures.
+var errNotFound = errors.New("not found")
+
 func (n *Node) base(p ts.Peer) string {
 	return fmt.Sprintf("http://%s/np/v1", netip.AddrPortFrom(p.IP, uint16(n.Store.Config.Port)))
 }
@@ -265,7 +270,11 @@ func do(ctx context.Context, method, url string, in, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%s %s: %s: %s", method, url, resp.Status, strings.TrimSpace(string(msg)))
+		err := fmt.Errorf("%s %s: %s: %s", method, url, resp.Status, strings.TrimSpace(string(msg)))
+		if resp.StatusCode == http.StatusNotFound {
+			err = fmt.Errorf("%w: %w", errNotFound, err)
+		}
+		return err
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
@@ -283,18 +292,22 @@ func (n *Node) PingPeer(ctx context.Context, p ts.Peer) (Ping, error) {
 
 // SyncReport summarises one sync run.
 type SyncReport struct {
-	Peer      string
-	Pulled    []string
-	Pushed    []string
-	Merged    []string // pulled notes that were three-way merged with a local edit
-	Conflicts []string
-	Errors    []string
+	Peer       string
+	Pulled     []string
+	Pushed     []string
+	Merged     []string // pulled notes that were three-way merged with a local edit
+	NotFetched []string // files whose metadata arrived without content
+	Conflicts  []string
+	Errors     []string
 }
 
 func (r SyncReport) String() string {
 	s := fmt.Sprintf("%s: pulled %d, pushed %d", r.Peer, len(r.Pulled), len(r.Pushed))
 	if len(r.Merged) > 0 {
 		s += fmt.Sprintf(", %d merged", len(r.Merged))
+	}
+	if len(r.NotFetched) > 0 {
+		s += fmt.Sprintf(", %d not fetched", len(r.NotFetched))
 	}
 	if len(r.Conflicts) > 0 {
 		s += fmt.Sprintf(", %d conflict(s)", len(r.Conflicts))
@@ -325,16 +338,26 @@ func (r SyncReport) Detail() string {
 // phase 2 pushes every note where we are ahead, including merge results.
 func (n *Node) Sync(ctx context.Context, p ts.Peer) (SyncReport, error) {
 	rep := SyncReport{Peer: p.Name}
+	if err := n.syncNotes(ctx, p, &rep); err != nil {
+		return rep, err
+	}
+	if err := n.syncFiles(ctx, p, &rep); err != nil {
+		return rep, err
+	}
+	return rep, nil
+}
+
+func (n *Node) syncNotes(ctx context.Context, p ts.Peer, rep *SyncReport) error {
 	base := n.base(p)
 	remoteBy, err := n.RemoteIndex(ctx, p)
 	if err != nil {
-		return rep, err
+		return err
 	}
 
 	n.Lock()
 	defer n.Unlock()
 	if _, err := n.Store.Scan(); err != nil {
-		return rep, err
+		return err
 	}
 
 	// Phase 1: pull.
@@ -394,7 +417,7 @@ func (n *Node) Sync(ctx context.Context, p ts.Peer) (SyncReport, error) {
 			rep.Pushed = append(rep.Pushed, lm.Name)
 		}
 	}
-	return rep, nil
+	return nil
 }
 
 // SyncAll syncs with every online peer that answers np's ping, in parallel.
@@ -463,6 +486,18 @@ const (
 	New      SyncState = "new"      // peer has never seen this note
 )
 
+func state(c int) SyncState {
+	switch c {
+	case clock.Equal:
+		return Synced
+	case clock.Dominates:
+		return Ahead
+	case clock.Dominated:
+		return Behind
+	}
+	return Diverged
+}
+
 // Compare classifies every local note against a peer index. Notes that
 // exist only on the peer are returned under their name as Behind.
 func Compare(local []*store.Meta, remote map[string]store.Meta) map[string]SyncState {
@@ -475,16 +510,7 @@ func Compare(local []*store.Meta, remote map[string]store.Meta) map[string]SyncS
 			out[lm.Name] = New
 			continue
 		}
-		switch clock.Compare(lm.Clock, rm.Clock) {
-		case clock.Equal:
-			out[lm.Name] = Synced
-		case clock.Dominates:
-			out[lm.Name] = Ahead
-		case clock.Dominated:
-			out[lm.Name] = Behind
-		default:
-			out[lm.Name] = Diverged
-		}
+		out[lm.Name] = state(clock.Compare(lm.Clock, rm.Clock))
 	}
 	for name, rm := range remote {
 		if !seen[name] && !rm.Deleted {

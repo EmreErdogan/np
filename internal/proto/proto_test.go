@@ -2,9 +2,11 @@ package proto
 
 import (
 	"context"
+	"io"
 	"net/http/httptest"
 	"net/netip"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,5 +190,137 @@ func TestSyncMergesDisjointEditsThroughHub(t *testing.T) {
 		if len(n.Store.List(false)) != 1 {
 			t.Fatalf("%s has %d notes", n.Self.Name, len(n.Store.List(false)))
 		}
+	}
+}
+
+func readFile(t *testing.T, n *Node, name string) string {
+	t.Helper()
+	f, err := n.Store.OpenFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(f)
+	return string(b)
+}
+
+func TestSyncFilesLazy(t *testing.T) {
+	ctx := context.Background()
+	hub := newNode(t, "hub", "emre@example.com")
+	hub.Store.Config.KeepAll = true
+	hubPeer := serve(t, hub, "emre@example.com")
+	a := newNode(t, "a", "emre@example.com")
+	b := newNode(t, "b", "emre@example.com")
+	a.Store.Config.Port = hub.Store.Config.Port
+	b.Store.Config.Port = hub.Store.Config.Port
+	a.Store.Config.AutoFetch = 16
+	b.Store.Config.AutoFetch = 16
+
+	small := "tiny"
+	big := strings.Repeat("x", 100)
+	a.Store.PutFile("icon.png", strings.NewReader(small), "a")
+	a.Store.PutFile("movie.mp4", strings.NewReader(big), "a")
+
+	// a pushes both with content; the hub keeps everything.
+	rep, err := a.Sync(ctx, hubPeer)
+	if err != nil || len(rep.Pushed) != 2 || len(rep.Errors) != 0 {
+		t.Fatalf("rep=%+v err=%v", rep, err)
+	}
+	if readFile(t, hub, "movie.mp4") != big || readFile(t, hub, "icon.png") != small {
+		t.Fatal("hub content")
+	}
+
+	// b pulls the small file with content and the big one as a stub.
+	rep, _ = b.Sync(ctx, hubPeer)
+	if len(rep.Pulled) != 2 || len(rep.NotFetched) != 1 || rep.NotFetched[0] != "files/movie.mp4" {
+		t.Fatalf("b: %+v", rep)
+	}
+	if readFile(t, b, "icon.png") != small {
+		t.Fatal("small file should have content")
+	}
+	if m := b.Store.File("movie.mp4"); m == nil || m.Have || m.Size != 100 {
+		t.Fatalf("stub=%+v", m)
+	}
+	// Idempotent: nothing moves on the next run, the stub is not re-pulled.
+	if rep, _ = b.Sync(ctx, hubPeer); len(rep.Pulled)+len(rep.Pushed) != 0 {
+		t.Fatalf("second sync: %+v", rep)
+	}
+
+	// Explicit fetch fills the stub.
+	if err := b.FetchFileFrom(ctx, hubPeer, "movie.mp4"); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, b, "movie.mp4") != big {
+		t.Fatal("fetched content")
+	}
+
+	// A new version of a file b holds is pulled with content even if big.
+	a.Store.PutFile("movie.mp4", strings.NewReader(big+"2"), "a")
+	a.Sync(ctx, hubPeer)
+	rep, _ = b.Sync(ctx, hubPeer)
+	if len(rep.Pulled) != 1 || len(rep.NotFetched) != 0 {
+		t.Fatalf("b update: %+v", rep)
+	}
+	if readFile(t, b, "movie.mp4") != big+"2" {
+		t.Fatal("updated content")
+	}
+
+	// Delete propagates and removes content everywhere.
+	if err := b.Store.DeleteFile("movie.mp4", "b"); err != nil {
+		t.Fatal(err)
+	}
+	b.Sync(ctx, hubPeer)
+	a.Sync(ctx, hubPeer)
+	for _, n := range []*Node{hub, a, b} {
+		if _, err := n.Store.OpenFile("movie.mp4"); err == nil {
+			t.Fatalf("%s still has movie.mp4", n.Self.Name)
+		}
+	}
+	if len(a.Store.Files(false)) != 1 {
+		t.Fatal("a should have one file left")
+	}
+}
+
+func TestSyncFilesStubDoesNotDowngradeHolder(t *testing.T) {
+	ctx := context.Background()
+	hub := newNode(t, "hub", "emre@example.com")
+	hubPeer := serve(t, hub, "emre@example.com")
+	a := newNode(t, "a", "emre@example.com")
+	a.Store.Config.Port = hub.Store.Config.Port
+	// Hub does not keep big files; a uploads one, hub stores a stub only?
+	// No: pushes always carry content. But a later metadata-only push from a
+	// node that only knows about a newer version must not wipe the hub.
+	a.Store.Config.AutoFetch = 4
+	hub.Store.Config.AutoFetch = 4
+	a.Store.PutFile("f.bin", strings.NewReader("0123456789"), "a")
+	a.Sync(ctx, hubPeer)
+	if readFile(t, hub, "f.bin") != "0123456789" {
+		t.Fatal("hub should hold the pushed content")
+	}
+	c := newNode(t, "c", "emre@example.com")
+	c.Store.Config.Port = hub.Store.Config.Port
+	c.Store.Config.AutoFetch = 4
+	c.Sync(ctx, hubPeer) // c gets a stub
+	if m := c.Store.File("f.bin"); m == nil || m.Have {
+		t.Fatalf("c=%+v", m)
+	}
+	// c drops nothing but forges a newer stub-only version? Not possible in
+	// practice: c can only bump what it edits, and editing needs content.
+	// Instead: hub drops its copy; a still has content and refills the hub.
+	if err := hub.Store.DropFile("f.bin"); err != nil {
+		t.Fatal(err)
+	}
+	rep, _ := a.Sync(ctx, hubPeer)
+	if len(rep.Pushed) != 0 { // 10 bytes > hub's 4-byte auto limit: not refilled unasked
+		t.Fatalf("a: %+v", rep)
+	}
+	hub.Store.Config.KeepAll = true
+	hub.Store.Config.Hub = ""
+	// The hub pulls it back when it syncs (keep_all) with a.
+	aPeer := serve(t, a, "emre@example.com")
+	hub.Store.Config.Port = a.Store.Config.Port
+	rep, _ = hub.Sync(ctx, aPeer)
+	if len(rep.Pulled) != 1 || readFile(t, hub, "f.bin") != "0123456789" {
+		t.Fatalf("hub refill: %+v", rep)
 	}
 }

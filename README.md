@@ -49,6 +49,12 @@ np log todo                 # history with vector clocks
 np show todo 2              # print version 2
 np rm todo                  # deletion syncs as a tombstone
 
+np put ~/Pictures/cat.jpg   # share any file (name defaults to cat.jpg)
+np put video.mp4 trips/     # ...into a folder
+np get video.mp4            # download a file that only the hub/peers hold
+np get video.mp4 -o ~/Desktop
+np drop video.mp4           # free the local copy, keep knowing about it
+
 np peers                    # who is on the tailnet and who runs np
 np hub laptop               # default sync target
 np sync                     # sync with hub
@@ -77,6 +83,18 @@ blank line is inserted before the addition so it renders as its own
 paragraph, unless a list item is added to a list, which keeps the list tight.
 The web UI has the same thing as an "add a line" box under every note.
 
+### Files
+
+Any file (images, video, archives) can be shared next to the notes. They
+live in `~/.np/files/` and sync with the same clocks, tombstones and
+conflict copies as notes, but with two differences: no version history, and
+content is fetched lazily. Every machine learns that a file exists; its
+bytes follow automatically only when the file is at most `auto_fetch_bytes`
+(2 MB by default), when this machine already held an earlier version, or
+when the node has `keep_all` set (do that on the hub, which then acts as
+the archive). Bigger files are listed as "not fetched" until `np get`, or
+the Fetch button in the web UI. `np ls` shows files in a block at the end.
+
 ## Web UI
 
 The daemon serves a small phone-friendly page at `http://<tailscale-ip>:7373/`
@@ -84,7 +102,9 @@ The daemon serves a small phone-friendly page at `http://<tailscale-ip>:7373/`
 such as a phone running Tailscale, to read, edit, create and delete notes.
 Markdown notes are rendered; other file types are shown as highlighted code.
 Every note has a History page listing its versions; any version can be
-viewed and restored as the new current content.
+viewed and restored as the new current content. Files have their own list
+with an upload box (photos from a phone, for instance); images, video,
+audio and small text files preview inline, everything else downloads.
 Edits are committed like local edits and fanned out to peers immediately.
 Access uses the same tailnet identity rules as sync.
 
@@ -92,10 +112,12 @@ Access uses the same tailnet identity rules as sync.
 
 - Each note carries a vector clock (`server:3,laptop:1`). Sync compares clocks:
   the side that is strictly ahead wins, and its version is copied over.
-- Concurrent edits (neither side has seen the other's change) are resolved by
-  newest modification time. The losing version is kept as
-  `name.conflict-<node>-<time>.md` next to the winner, so nothing is lost.
-  The merged result gets a fresh clock and propagates to every peer.
+- Concurrent edits (neither side has seen the other's change) of a text note
+  are merged line by line against the last version both sides knew, like a
+  git three-way merge. When both sides changed the same lines, or a file is
+  binary, the newest modification time wins and the losing version is kept
+  as `name.conflict-<node>-<time>.md` next to the winner, so nothing is
+  lost. The merged result gets a fresh clock and propagates to every peer.
 - Deletes are tombstones, so they propagate too.
 - Every version of every note is stored under `~/.np/history/`.
 
@@ -105,5 +127,6 @@ Access uses the same tailnet identity rules as sync.
 
 ```json
 { "hub": "laptop", "port": 7373, "interval_seconds": 15,
-  "allow": ["friend@example.com"] }
+  "allow": ["friend@example.com"],
+  "auto_fetch_bytes": 2097152, "keep_all": false }
 ```

@@ -1,8 +1,10 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -177,5 +179,91 @@ func TestHistoryAndRestore(t *testing.T) {
 	}
 	if r := post(t, srv.URL+"/web/restore", `{"name":"doc","seq":9}`, true); r.StatusCode != http.StatusBadRequest {
 		t.Fatal("bad seq accepted")
+	}
+}
+
+func upload(t *testing.T, url, field, filename, content string, guarded bool) *http.Response {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile(field, filename)
+	fw.Write([]byte(content))
+	mw.Close()
+	req, _ := http.NewRequest("POST", url, &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if guarded {
+		req.Header.Set("X-Requested-With", "np")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestFileUploadViewDelete(t *testing.T) {
+	n, srv := setup(t)
+	if r := upload(t, srv.URL+"/web/upload", "file", "cat.png", "PNG\x00img", false); r.StatusCode != 403 {
+		t.Fatalf("unguarded upload: %d", r.StatusCode)
+	}
+	r := upload(t, srv.URL+"/web/upload", "file", "cat.png", "PNG\x00img", true)
+	if r.StatusCode != 200 {
+		b, _ := io.ReadAll(r.Body)
+		t.Fatalf("upload: %d %s", r.StatusCode, b)
+	}
+	m := n.Store.File("cat.png")
+	if m == nil || !m.Have || m.ModBy != "phone" || m.Size != 7 {
+		t.Fatalf("meta=%+v", m)
+	}
+	if r := upload(t, srv.URL+"/web/upload", "file", "cat.png", "other", true); r.StatusCode != 409 {
+		t.Fatalf("duplicate upload: %d", r.StatusCode)
+	}
+	// List shows it; file page previews it; raw serves it.
+	resp, _ := http.Get(srv.URL + "/")
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `href="/f/cat.png"`) {
+		t.Fatal("list should link the file")
+	}
+	resp, _ = http.Get(srv.URL + "/f/cat.png")
+	body, _ = io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `<img class=prev src="/raw/cat.png"`) {
+		t.Fatalf("file page: %s", body)
+	}
+	resp, _ = http.Get(srv.URL + "/raw/cat.png")
+	body, _ = io.ReadAll(resp.Body)
+	if resp.Header.Get("Content-Type") != "image/png" || string(body) != "PNG\x00img" {
+		t.Fatalf("raw: %s %q", resp.Header.Get("Content-Type"), body)
+	}
+	// Text files get an inline preview.
+	upload(t, srv.URL+"/web/upload", "file", "notes.txt", "hello", true)
+	resp, _ = http.Get(srv.URL + "/f/notes.txt")
+	body, _ = io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "<pre>hello</pre>") {
+		t.Fatalf("text preview: %s", body)
+	}
+	// Delete.
+	if r := post(t, srv.URL+"/web/delete-file", `{"name":"cat.png"}`, true); r.StatusCode != 200 {
+		t.Fatalf("delete: %d", r.StatusCode)
+	}
+	if m := n.Store.File("cat.png"); !m.Deleted {
+		t.Fatal("should be a tombstone")
+	}
+	if resp, _ := http.Get(srv.URL + "/raw/cat.png"); resp.StatusCode != 404 {
+		t.Fatalf("raw after delete: %d", resp.StatusCode)
+	}
+}
+
+func TestFileStubPage(t *testing.T) {
+	n, srv := setup(t)
+	n.Store.ApplyFile(store.FileMeta{Name: "big.mov", Hash: "abc", Size: 5 << 20, ModBy: "laptop", Have: true}, nil)
+	resp, _ := http.Get(srv.URL + "/f/big.mov")
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Not on this machine yet") || !strings.Contains(string(body), "5.0 MB") {
+		t.Fatalf("stub page: %s", body)
+	}
+	resp, _ = http.Get(srv.URL + "/")
+	body, _ = io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "not fetched") {
+		t.Fatal("list should mark stubs")
 	}
 }
