@@ -150,3 +150,43 @@ func TestCompareStates(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncMergesDisjointEditsThroughHub(t *testing.T) {
+	ctx := context.Background()
+	hub := newNode(t, "hub", "emre@example.com")
+	hubPeer := serve(t, hub, "emre@example.com")
+	a := newNode(t, "a", "emre@example.com")
+	b := newNode(t, "b", "emre@example.com")
+	a.Store.Config.Port = hub.Store.Config.Port
+	b.Store.Config.Port = hub.Store.Config.Port
+
+	a.Store.Write("list", []byte("- milk\n- eggs\n"))
+	a.Sync(ctx, hubPeer)
+	b.Sync(ctx, hubPeer)
+
+	a.Store.Write("list", []byte("- oat milk\n- eggs\n"))
+	b.Store.Write("list", []byte("- milk\n- eggs\n- bread\n"))
+	a.Sync(ctx, hubPeer)
+	// b pulls a's version, merges it locally, and pushes the result in the
+	// same run.
+	rep, _ := b.Sync(ctx, hubPeer)
+	if len(rep.Conflicts) != 0 || len(rep.Merged) != 1 || len(rep.Pushed) != 1 {
+		t.Fatalf("b: %+v", rep)
+	}
+	if rep, _ = b.Sync(ctx, hubPeer); len(rep.Pulled)+len(rep.Pushed) != 0 {
+		t.Fatalf("b second sync should be a no-op: %+v", rep)
+	}
+	rep, _ = a.Sync(ctx, hubPeer)
+	if len(rep.Pulled) != 1 {
+		t.Fatalf("a: %+v", rep)
+	}
+	for _, n := range []*Node{hub, a, b} {
+		got, _ := n.Store.Read("list")
+		if string(got) != "- oat milk\n- eggs\n- bread\n" {
+			t.Fatalf("%s has %q", n.Self.Name, got)
+		}
+		if len(n.Store.List(false)) != 1 {
+			t.Fatalf("%s has %d notes", n.Self.Name, len(n.Store.List(false)))
+		}
+	}
+}

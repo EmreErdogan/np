@@ -682,6 +682,9 @@ func printReport(rep proto.SyncReport) {
 	for _, s := range rep.Pushed {
 		fmt.Println("  ->", s)
 	}
+	for _, s := range rep.Merged {
+		fmt.Println("  == merged:", s, "(both edits combined)")
+	}
 	for _, s := range rep.Conflicts {
 		fmt.Println("  !! conflict:", s, "(loser kept as *.conflict-* note)")
 	}

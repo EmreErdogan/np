@@ -212,3 +212,97 @@ func TestJoin(t *testing.T) {
 		t.Fatal("empty append should fail")
 	}
 }
+
+func TestApplyMergesDisjointConcurrentEdits(t *testing.T) {
+	a, b := open(t, "a"), open(t, "b")
+	a.Write("n", []byte("one\ntwo\nthree\n"))
+	transfer(t, a, b, "n")
+	a.Write("n", []byte("ONE\ntwo\nthree\n"))
+	b.Write("n", []byte("one\ntwo\nthree\nfour\n"))
+	if r := transfer(t, b, a, "n"); r != Merged {
+		t.Fatal(r)
+	}
+	got, _ := a.Read("n")
+	if string(got) != "ONE\ntwo\nthree\nfour\n" {
+		t.Fatalf("merged=%q", got)
+	}
+	if n := len(a.List(false)); n != 1 {
+		t.Fatalf("expected no conflict copy, have %d notes", n)
+	}
+	m := a.Get("n")
+	if m.ModBy != "a" || len(m.History) != 3 || m.History[2].Hash != m.Hash {
+		t.Fatalf("meta=%+v", m)
+	}
+	if clock.Compare(m.Clock, b.Get("n").Clock) != clock.Dominates {
+		t.Fatal("merged clock should dominate b")
+	}
+	// The merge flows back to b as a plain accept.
+	if r := transfer(t, a, b, "n"); r != Accepted {
+		t.Fatal(r)
+	}
+	got, _ = b.Read("n")
+	if string(got) != "ONE\ntwo\nthree\nfour\n" {
+		t.Fatalf("b=%q", got)
+	}
+	// Scan must not see the merged file as a new local edit.
+	if ch, _ := a.Scan(); len(ch) != 0 {
+		t.Fatalf("scan changed %v", ch)
+	}
+}
+
+func TestApplyConcurrentIdenticalContent(t *testing.T) {
+	// a and b sync directly and each merges the other's edit; the results
+	// are identical but their clocks are concurrent. No conflict copy.
+	a, b := open(t, "a"), open(t, "b")
+	a.Write("n", []byte("one\ntwo\n"))
+	transfer(t, a, b, "n")
+	a.Write("n", []byte("ONE\ntwo\n"))
+	b.Write("n", []byte("one\ntwo\nthree\n"))
+	ma, da := *a.Get("n"), mustRead(t, a, "n")
+	mb, db := *b.Get("n"), mustRead(t, b, "n")
+	if r, _ := a.Apply(mb, db); r != Merged {
+		t.Fatal(r)
+	}
+	if r, _ := b.Apply(ma, da); r != Merged {
+		t.Fatal(r)
+	}
+	if clock.Compare(a.Get("n").Clock, b.Get("n").Clock) != clock.Concurrent {
+		t.Fatal("expected concurrent merge results")
+	}
+	if r := transfer(t, b, a, "n"); r != Unchanged {
+		t.Fatal(r)
+	}
+	if n := len(a.List(false)); n != 1 {
+		t.Fatalf("have %d notes", n)
+	}
+	if r := transfer(t, a, b, "n"); r != Accepted {
+		t.Fatal(r)
+	}
+	if clock.Compare(a.Get("n").Clock, b.Get("n").Clock) != clock.Equal {
+		t.Fatal("clocks should converge")
+	}
+}
+
+func TestApplyOverlappingEditsStillConflict(t *testing.T) {
+	a, b := open(t, "a"), open(t, "b")
+	a.Write("n", []byte("one\ntwo\n"))
+	transfer(t, a, b, "n")
+	a.Write("n", []byte("uno\ntwo\n"))
+	time.Sleep(10 * time.Millisecond)
+	b.Write("n", []byte("bir\ntwo\n"))
+	if r := transfer(t, b, a, "n"); r != Conflicted {
+		t.Fatal(r)
+	}
+	if n := len(a.List(false)); n != 2 {
+		t.Fatalf("have %d notes", n)
+	}
+}
+
+func mustRead(t *testing.T, s *Store, name string) []byte {
+	t.Helper()
+	d, err := s.Read(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}

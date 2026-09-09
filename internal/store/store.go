@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/EmreErdogan/np/internal/clock"
+	"github.com/EmreErdogan/np/internal/merge"
 )
 
 const noteExt = ".md"
@@ -80,6 +81,7 @@ type ApplyResult string
 const (
 	Accepted   ApplyResult = "accepted"
 	Unchanged  ApplyResult = "unchanged"
+	Merged     ApplyResult = "merged" // concurrent edits combined without overlap
 	Conflicted ApplyResult = "conflicted"
 	Rejected   ApplyResult = "rejected" // local is newer; sender should pull
 )
@@ -386,7 +388,9 @@ func (s *Store) scanAs(by string) error {
 }
 
 // Apply merges a note received from a peer into the local store.
-// Ordering is decided by vector clocks; on concurrent edits the newer
+// Ordering is decided by vector clocks. Concurrent edits of a text note are
+// combined with a three-way merge against the last version both sides knew;
+// when the edits overlap (or either side is a delete or binary), the newer
 // modification time wins and the loser is preserved as a conflict note.
 func (s *Store) Apply(remote Meta, content []byte) (ApplyResult, error) {
 	if err := ValidName(remote.Name); err != nil {
@@ -412,6 +416,22 @@ func (s *Store) Apply(remote Meta, content []byte) (ApplyResult, error) {
 			return Rejected, err
 		}
 		return Accepted, s.saveIndex()
+	}
+	// Concurrent with identical content (both sides merged the same way):
+	// just reconcile the clocks, nothing to record.
+	if local.Hash == remote.Hash && local.Deleted == remote.Deleted {
+		local.Clock = clock.Merge(local.Clock, remote.Clock)
+		local.History[len(local.History)-1].Clock = local.Clock.Copy()
+		return Unchanged, s.saveIndex()
+	}
+	// Concurrent text edits: try a three-way merge.
+	if !local.Deleted && !remote.Deleted {
+		if out, ok := s.merge3(local, remote, content); ok {
+			if err := s.commitMerge(local, remote, out); err != nil {
+				return Rejected, err
+			}
+			return Merged, s.saveIndex()
+		}
 	}
 	// Concurrent: decide a winner, keep the loser as a conflict copy.
 	remoteWins := remote.ModTime.After(local.ModTime) ||
@@ -457,6 +477,63 @@ func (s *Store) Apply(remote Meta, content []byte) (ApplyResult, error) {
 		}
 	}
 	return Conflicted, s.saveIndex()
+}
+
+// merge3 finds the latest local version the remote side had already seen
+// and merges both edits on top of it. ok is false when there is no such
+// ancestor, the note is not text, or the edits overlap.
+func (s *Store) merge3(local *Meta, remote Meta, remoteData []byte) ([]byte, bool) {
+	var base *Version
+	for i := len(local.History) - 1; i >= 0; i-- {
+		v := &local.History[i]
+		if v.Deleted {
+			continue
+		}
+		if c := clock.Compare(v.Clock, remote.Clock); c == clock.Equal || c == clock.Dominated {
+			base = v
+			break
+		}
+	}
+	if base == nil {
+		return nil, false
+	}
+	baseData, err := s.Snapshot(local.Name, base.Hash)
+	if err != nil {
+		return nil, false
+	}
+	localData, err := s.Read(local.Name)
+	if err != nil {
+		return nil, false
+	}
+	if !merge.IsText(baseData) || !merge.IsText(localData) || !merge.IsText(remoteData) {
+		return nil, false
+	}
+	return merge.Merge(baseData, localData, remoteData)
+}
+
+// commitMerge records out as a new version by this node that dominates both
+// local and remote.
+func (s *Store) commitMerge(local *Meta, remote Meta, out []byte) error {
+	p, err := s.Path(local.Name)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(p, out, 0o644); err != nil {
+		return err
+	}
+	h := hashOf(out)
+	if err := s.writeSnapshot(local.Name, h, out); err != nil {
+		return err
+	}
+	local.Clock = clock.Merge(local.Clock, remote.Clock).Bump(s.Node)
+	local.Hash = h
+	local.ModTime = time.Now().UTC()
+	local.ModBy = s.Node
+	local.Deleted = false
+	local.History = append(local.History, Version{
+		Seq: len(local.History) + 1, Hash: h, ModTime: local.ModTime, ModBy: local.ModBy, Clock: local.Clock.Copy(),
+	})
+	return nil
 }
 
 // install writes remote's content/metadata as-is (no clock bump).

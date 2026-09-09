@@ -171,7 +171,7 @@ func (n *Node) Handler() http.Handler {
 			return
 		}
 		n.logf("%s pushed %s: %s", peer.Name, note.Meta.Name, res)
-		if res == store.Accepted || res == store.Conflicted {
+		if res == store.Accepted || res == store.Merged || res == store.Conflicted {
 			n.NotifyChanged()
 		}
 		writeJSON(w, Apply{Result: res})
@@ -286,12 +286,16 @@ type SyncReport struct {
 	Peer      string
 	Pulled    []string
 	Pushed    []string
+	Merged    []string // pulled notes that were three-way merged with a local edit
 	Conflicts []string
 	Errors    []string
 }
 
 func (r SyncReport) String() string {
 	s := fmt.Sprintf("%s: pulled %d, pushed %d", r.Peer, len(r.Pulled), len(r.Pushed))
+	if len(r.Merged) > 0 {
+		s += fmt.Sprintf(", %d merged", len(r.Merged))
+	}
 	if len(r.Conflicts) > 0 {
 		s += fmt.Sprintf(", %d conflict(s)", len(r.Conflicts))
 	}
@@ -355,6 +359,9 @@ func (n *Node) Sync(ctx context.Context, p ts.Peer) (SyncReport, error) {
 		switch res {
 		case store.Accepted:
 			rep.Pulled = append(rep.Pulled, name)
+		case store.Merged:
+			rep.Pulled = append(rep.Pulled, name)
+			rep.Merged = append(rep.Merged, name)
 		case store.Conflicted:
 			rep.Pulled = append(rep.Pulled, name)
 			rep.Conflicts = append(rep.Conflicts, name)
@@ -383,7 +390,7 @@ func (n *Node) Sync(ctx context.Context, p ts.Peer) (SyncReport, error) {
 			continue
 		}
 		switch ack.Result {
-		case store.Accepted, store.Conflicted:
+		case store.Accepted, store.Merged, store.Conflicted:
 			rep.Pushed = append(rep.Pushed, lm.Name)
 		}
 	}
