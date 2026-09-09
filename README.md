@@ -35,6 +35,9 @@ np new todo                 # opens $EDITOR; or: echo "buy milk" | np new todo
 np ls                       # tree view with sync state against the hub: synced/ahead/new/behind/conflict
 np ls work                  # only notes under work/
 np ls --local               # skip the hub lookup; --flat for a plain list
+np ls --path                # absolute paths instead of names (flat)
+np path todo                # absolute path: vim $(np path todo), open $(np path pic.jpg)
+np path -c todo             # ...copied to the clipboard (over SSH: your local one, via OSC 52)
 np new work/ideas/next      # slashes make folders
 np cat todo                 # raw content
 np view todo                # rendered in the terminal

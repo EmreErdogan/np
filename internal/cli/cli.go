@@ -37,7 +37,9 @@ Notes:
                          append text (or stdin, or an editor buffer) to a note;
                          -t prefixes a timestamp. Creates the note if missing.
   np ls [dir] [--local]  list notes as a tree, optionally under dir; --local skips the hub
-  np ls --flat           plain list
+  np ls --flat           plain list; --path lists absolute paths instead of names
+  np path [-c] <name>    print the absolute path of a note or file; -c copies it
+                         to the clipboard (over SSH: your local terminal's, via OSC 52)
   np cat <name>          print a note
   np view <name>         render a note in the terminal (markdown or code)
   np search <text>       find notes whose name or content contains text
@@ -130,6 +132,8 @@ func run(cmd string, args []string) error {
 		return cmdView(n, args)
 	case "rm", "delete":
 		return cmdRm(n, args)
+	case "path":
+		return cmdPath(n, args)
 	case "put":
 		return cmdPut(n, args)
 	case "get":
@@ -337,13 +341,15 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 	if _, err := n.Store.Scan(); err != nil {
 		return err
 	}
-	local, flat, prefix := false, false, ""
+	local, flat, paths, prefix := false, false, false, ""
 	for _, a := range args {
 		switch a {
 		case "--local":
 			local = true
 		case "--flat":
 			flat = true
+		case "--path", "-p":
+			flat, paths = true, true
 		default:
 			prefix = strings.TrimSuffix(a, "/")
 		}
@@ -372,6 +378,12 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 			rows = append(rows, row{name, "", "", "behind (hub only)"})
 		}
 	}
+	shown := func(r row) string {
+		if paths && listed[r.name] {
+			return n.Store.LocalPath(r.name)
+		}
+		return r.name
+	}
 	if prefix != "" {
 		var kept []row
 		for _, r := range rows {
@@ -399,12 +411,15 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 			}
 			indent = strings.Repeat("  ", strings.Count(dir, "/")+boolInt(dir != ""))
 		}
+		if paths {
+			name = shown(r)
+		}
 		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\n", indent, name, r.when, r.by, r.state)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	if err := listFiles(n, prefix, flat, fileStates, states != nil || local); err != nil {
+	if err := listFiles(n, prefix, flat, paths, fileStates); err != nil {
 		return err
 	}
 	// Without a hub (typically on the hub itself) there is nothing to compare
@@ -417,7 +432,7 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 
 // listFiles prints the files block of np ls: name, size, date, author, and
 // the hub state ("not fetched" when only the metadata is here).
-func listFiles(n *proto.Node, prefix string, flat bool, states map[string]proto.SyncState, haveStates bool) error {
+func listFiles(n *proto.Node, prefix string, flat, paths bool, states map[string]proto.SyncState) error {
 	type row struct {
 		name, size, when, by, state string
 	}
@@ -435,7 +450,11 @@ func listFiles(n *proto.Node, prefix string, flat bool, states map[string]proto.
 			}
 			st += "not fetched"
 		}
-		rows = append(rows, row{m.Name, store.FileSize(m.Size), m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy, st})
+		name := m.Name
+		if paths && m.Have {
+			name = n.Store.FileLocalPath(m.Name)
+		}
+		rows = append(rows, row{name, store.FileSize(m.Size), m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy, st})
 	}
 	for name, st := range states {
 		if !listed[name] && st == proto.Behind {
@@ -603,6 +622,52 @@ func cmdRm(n *proto.Node, args []string) error {
 		return n.Store.DeleteFile(args[0], n.Self.Name)
 	}
 	return fmt.Errorf("no note or file %q", args[0])
+}
+
+// cmdPath prints (or copies) the absolute path of a note or, failing that,
+// a file with that name.
+func cmdPath(n *proto.Node, args []string) error {
+	clip := false
+	var rest []string
+	for _, a := range args {
+		if a == "-c" || a == "--copy" {
+			clip = true
+		} else {
+			rest = append(rest, a)
+		}
+	}
+	if len(rest) != 1 {
+		return errors.New("expected [-c] <name>")
+	}
+	n.Store.Scan()
+	p, err := localPath(n, rest[0])
+	if err != nil {
+		return err
+	}
+	if !clip {
+		fmt.Println(p)
+		return nil
+	}
+	how, err := copyToClipboard(p)
+	if err != nil {
+		fmt.Println(p)
+		return err
+	}
+	fmt.Printf("%s\ncopied via %s\n", p, how)
+	return nil
+}
+
+func localPath(n *proto.Node, arg string) (string, error) {
+	if m := n.Store.Get(store.Canon(arg)); m != nil && !m.Deleted {
+		return n.Store.LocalPath(m.Name), nil
+	}
+	if m := n.Store.File(arg); m != nil && !m.Deleted {
+		if !m.Have {
+			return "", fmt.Errorf("%s is not on this machine yet (np get %s)", arg, arg)
+		}
+		return n.Store.FileLocalPath(m.Name), nil
+	}
+	return "", fmt.Errorf("no note or file %q", arg)
 }
 
 func cmdPut(n *proto.Node, args []string) error {

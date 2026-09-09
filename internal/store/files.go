@@ -58,6 +58,9 @@ func (s *Store) filePath(name string) string {
 	return filepath.Join(s.Dir, "files", filepath.FromSlash(name))
 }
 
+// FileLocalPath is the absolute working path of a file (no dirs created).
+func (s *Store) FileLocalPath(name string) string { return s.filePath(name) }
+
 // FilePath returns the working path of a file, creating parent dirs.
 func (s *Store) FilePath(name string) (string, error) {
 	if err := ValidFileName(name); err != nil {

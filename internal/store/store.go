@@ -385,6 +385,9 @@ func (s *Store) Read(name string) ([]byte, error) {
 	return os.ReadFile(s.notePath(name))
 }
 
+// LocalPath is the absolute working file path of a note (no dirs created).
+func (s *Store) LocalPath(name string) string { return s.notePath(name) }
+
 // Path returns the working file path for a note, creating parent dirs.
 func (s *Store) Path(name string) (string, error) {
 	if err := ValidName(name); err != nil {
