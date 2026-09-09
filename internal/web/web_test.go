@@ -153,3 +153,29 @@ func TestAppend(t *testing.T) {
 		t.Fatal("unguarded append accepted")
 	}
 }
+
+func TestHistoryAndRestore(t *testing.T) {
+	n, srv := setup(t)
+	n.Store.Write("doc", []byte("one"))
+	n.Store.Write("doc", []byte("two"))
+	resp, _ := http.Get(srv.URL + "/h/doc")
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "v2") || !strings.Contains(string(body), "v1") {
+		t.Fatalf("history page: %d %.200s", resp.StatusCode, body)
+	}
+	resp, _ = http.Get(srv.URL + "/h/doc?v=1")
+	body, _ = io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "one") || !strings.Contains(string(body), "Restore") {
+		t.Fatalf("version page: %.300s", body)
+	}
+	if r := post(t, srv.URL+"/web/restore", `{"name":"doc","seq":1}`, true); r.StatusCode != 200 {
+		t.Fatalf("restore: %d", r.StatusCode)
+	}
+	got, _ := n.Store.Read("doc")
+	if string(got) != "one" || len(n.Store.Get("doc").History) != 3 || n.Store.Get("doc").ModBy != "phone" {
+		t.Fatalf("after restore: %q %+v", got, n.Store.Get("doc"))
+	}
+	if r := post(t, srv.URL+"/web/restore", `{"name":"doc","seq":9}`, true); r.StatusCode != http.StatusBadRequest {
+		t.Fatal("bad seq accepted")
+	}
+}

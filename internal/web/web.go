@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/EmreErdogan/np/internal/proto"
@@ -26,6 +27,8 @@ func Mount(n *proto.Node) func(mux *http.ServeMux) {
 		mux.HandleFunc("GET /{$}", n.Auth(w.list))
 		mux.HandleFunc("GET /new", n.Auth(w.create))
 		mux.HandleFunc("GET /n/{name...}", n.Auth(w.note))
+		mux.HandleFunc("GET /h/{name...}", n.Auth(w.history))
+		mux.HandleFunc("POST /web/restore", n.Auth(w.restore))
 		mux.HandleFunc("POST /web/save", n.Auth(w.save))
 		mux.HandleFunc("POST /web/delete", n.Auth(w.del))
 		mux.HandleFunc("POST /web/append", n.Auth(w.appendNote))
@@ -97,6 +100,82 @@ func (u *ui) note(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
 		data["HTML"] = render.HTML(name, content)
 	}
 	page(w, noteTmpl, data)
+}
+
+// history lists a note's versions, or shows one when ?v=<seq> is given.
+func (u *ui) history(w http.ResponseWriter, r *http.Request, _ ts.Peer) {
+	name := store.Canon(r.PathValue("name"))
+	if err := store.ValidName(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	u.n.Lock()
+	u.n.Store.Scan()
+	m := u.n.Store.Get(name)
+	u.n.Unlock()
+	if m == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if v := r.URL.Query().Get("v"); v != "" {
+		seq, err := strconv.Atoi(v)
+		if err != nil || seq < 1 || seq > len(m.History) {
+			http.NotFound(w, r)
+			return
+		}
+		ver := m.History[seq-1]
+		var content []byte
+		if !ver.Deleted {
+			content, _ = u.n.Store.Snapshot(name, ver.Hash)
+		}
+		page(w, versionTmpl, map[string]any{
+			"Node": u.n.Self.Name, "Name": name, "Ver": ver, "Total": len(m.History),
+			"HTML": render.HTML(name, content), "Current": seq == len(m.History) && !m.Deleted,
+		})
+		return
+	}
+	// Newest first.
+	vers := make([]store.Version, 0, len(m.History))
+	for i := len(m.History) - 1; i >= 0; i-- {
+		vers = append(vers, m.History[i])
+	}
+	page(w, historyTmpl, map[string]any{"Node": u.n.Self.Name, "Name": name, "Versions": vers, "Deleted": m.Deleted})
+}
+
+// restore makes a historical version the current content, as a new version.
+func (u *ui) restore(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
+	if !guarded(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		Seq  int    `json:"seq"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Name = store.Canon(req.Name)
+	u.n.Lock()
+	defer u.n.Unlock()
+	m := u.n.Store.Get(req.Name)
+	if m == nil || req.Seq < 1 || req.Seq > len(m.History) || m.History[req.Seq-1].Deleted {
+		http.Error(w, "no such version", http.StatusBadRequest)
+		return
+	}
+	content, err := u.n.Store.Snapshot(req.Name, m.History[req.Seq-1].Hash)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := u.n.Store.WriteBy(req.Name, content, peer.Name); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u.n.Logf("%s restored %s to version %d via web", peer.Name, req.Name, req.Seq)
+	u.n.NotifyChanged()
+	writeJSON(w, map[string]string{"ok": "1"})
 }
 
 type saveReq struct {
@@ -224,6 +303,8 @@ textarea{min-height:60vh;font-family:ui-monospace,Menlo,monospace;font-size:15px
 .md blockquote{margin:0 0 12px;padding:4px 14px;border-left:3px solid var(--line);color:var(--mute)}.md a{color:var(--acc)}
 .md table{border-collapse:collapse;margin:0 0 12px;display:block;overflow-x:auto}.md th,.md td{border:1px solid var(--line);padding:6px 10px;text-align:left}
 .md img{max-width:100%}.md hr{border:0;border-top:1px solid var(--line);margin:16px 0}
+.ver{display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid var(--line);align-items:baseline}.ver a{color:inherit;text-decoration:none;flex:1}.ver small{color:var(--mute)}
+.banner{background:rgba(127,127,127,.12);border-radius:8px;padding:10px 14px;margin-bottom:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.banner .sp{flex:1}
 .md .chroma{padding:12px;border-radius:8px;overflow-x:auto;font-family:ui-monospace,Menlo,monospace;font-size:14px}
 ` + render.CSS()
 
@@ -243,7 +324,7 @@ var listTmpl = template.Must(template.New("list").Funcs(template.FuncMap{"base":
 var noteTmpl = template.Must(template.New("note").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>{{if .New}}new{{else}}{{.Name}}{{end}} · np</title><style>` + css + `</style><main>
 <header><h1><a href="/">np</a></h1><small>{{.Node}}</small><span class=sp></span>
-{{if not .Edit}}<a class=btn href="?edit">Edit</a>{{end}}</header>
+{{if not .Edit}}<a class=btn href="/h/{{.Name}}">History</a><a class=btn href="?edit">Edit</a>{{end}}</header>
 {{if .Edit}}
 <input id=name value="{{.Name}}" {{if not .New}}readonly{{else}}autofocus{{end}} placeholder="note name (add .json, .sh, .yaml… for non-markdown)">
 <div class=row></div>
@@ -264,4 +345,23 @@ function add(){var t=document.getElementById('a').value;if(!t.trim())return fals
 fetch('/web/append',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'np'},body:JSON.stringify({name:{{.Name}},content:t})})
 .then(function(r){return r.ok?location.reload():r.text().then(function(m){document.getElementById('msg').textContent=m})});return false}
 </script>{{end}}
+</main>`))
+
+var historyTmpl = template.Must(template.New("history").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>{{.Name}} history · np</title><style>` + css + `</style><main>
+<header><h1><a href="/">np</a></h1><small>{{.Node}}</small><span class=sp></span><a class=btn href="/n/{{.Name}}">Back</a></header>
+<h2 style="margin:0 0 8px;font-size:20px">{{.Name}}</h2>
+{{range .Versions}}<div class=ver><a href="/h/{{$.Name}}?v={{.Seq}}">v{{.Seq}}{{if .Deleted}} · deleted{{end}}</a><small>{{.ModBy}}</small><small>{{.ModTime.Local.Format "Jan 2 15:04:05"}}</small><small>{{.Clock}}</small></div>{{end}}
+</main>`))
+
+var versionTmpl = template.Must(template.New("version").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>{{.Name}} v{{.Ver.Seq}} · np</title><style>` + css + `</style><main>
+<header><h1><a href="/">np</a></h1><small>{{.Node}}</small><span class=sp></span><a class=btn href="/h/{{.Name}}">History</a><a class=btn href="/n/{{.Name}}">Current</a></header>
+<div class=banner><span>v{{.Ver.Seq}} of {{.Total}} · {{.Ver.ModBy}} · {{.Ver.ModTime.Local.Format "Jan 2 15:04:05"}}</span><span class=sp></span>
+{{if .Ver.Deleted}}<span>deleted</span>{{else if not .Current}}<button class=pri onclick="restore()">Restore this version</button>{{else}}<span>current</span>{{end}}</div>
+<div id=msg></div>
+{{if not .Ver.Deleted}}<div class=md>{{.HTML}}</div>{{end}}
+<script>function restore(){if(!confirm('Make v{{.Ver.Seq}} the current version of {{.Name}}?'))return;
+fetch('/web/restore',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'np'},body:JSON.stringify({name:{{.Name}},seq:{{.Ver.Seq}}})})
+.then(function(r){return r.ok?location.href='/n/{{.Name}}':r.text().then(function(m){document.getElementById('msg').textContent=m})})}</script>
 </main>`))

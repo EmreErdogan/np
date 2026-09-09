@@ -83,6 +83,8 @@ The daemon serves a small phone-friendly page at `http://<tailscale-ip>:7373/`
 (the URL is shown by `np status`). Open it from any device on the tailnet,
 such as a phone running Tailscale, to read, edit, create and delete notes.
 Markdown notes are rendered; other file types are shown as highlighted code.
+Every note has a History page listing its versions; any version can be
+viewed and restored as the new current content.
 Edits are committed like local edits and fanned out to peers immediately.
 Access uses the same tailnet identity rules as sync.
 
