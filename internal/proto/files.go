@@ -257,7 +257,7 @@ func (n *Node) syncFiles(ctx context.Context, p ts.Peer, rep *SyncReport) error 
 				continue // metadata alone never replaces content we hold
 			}
 		}
-		pulls = append(pulls, pull{rm, n.wantContent(lm, rm)})
+		pulls = append(pulls, pull{rm, n.wantContent(lm, rm) && !n.Store.CanCarry(rm)})
 	}
 	n.Unlock()
 

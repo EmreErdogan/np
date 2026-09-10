@@ -390,3 +390,39 @@ func TestSyncHistoryUnion(t *testing.T) {
 		t.Fatalf("a after delete: %+v", h)
 	}
 }
+
+func TestRenameThroughHubKeepsHistoryEverywhere(t *testing.T) {
+	ctx := context.Background()
+	hub := newNode(t, "hub", "emre@example.com")
+	hubPeer := serve(t, hub, "emre@example.com")
+	a := newNode(t, "a", "emre@example.com")
+	b := newNode(t, "b", "emre@example.com")
+	a.Store.Config.Port = hub.Store.Config.Port
+	b.Store.Config.Port = hub.Store.Config.Port
+
+	a.Store.Write("draft", []byte("one"))
+	time.Sleep(2 * time.Millisecond)
+	a.Store.Write("draft", []byte("two"))
+	a.Sync(ctx, hubPeer)
+	b.Sync(ctx, hubPeer)
+	if err := a.Store.Rename("draft", "final", ""); err != nil {
+		t.Fatal(err)
+	}
+	a.Sync(ctx, hubPeer)
+	b.Sync(ctx, hubPeer)
+	for _, n := range []*Node{hub, a, b} {
+		m := n.Store.Get("final")
+		if m == nil || len(m.History) != 3 || m.History[2].RenamedFrom != "draft" {
+			t.Fatalf("%s final=%+v", n.Self.Name, m)
+		}
+		if got, _ := n.Store.Snapshot("final", m.History[0].Hash); string(got) != "one" {
+			t.Fatalf("%s lost the first version", n.Self.Name)
+		}
+		if o := n.Store.Get("draft"); !o.Deleted || o.RenamedTo != "final" {
+			t.Fatalf("%s draft=%+v", n.Self.Name, o)
+		}
+		if len(n.Store.List(false)) != 1 {
+			t.Fatalf("%s has %d notes", n.Self.Name, len(n.Store.List(false)))
+		}
+	}
+}

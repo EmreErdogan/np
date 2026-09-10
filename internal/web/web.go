@@ -33,6 +33,7 @@ func Mount(n *proto.Node) func(mux *http.ServeMux) {
 		mux.HandleFunc("POST /web/save", n.Auth(w.save))
 		mux.HandleFunc("POST /web/delete", n.Auth(w.del))
 		mux.HandleFunc("POST /web/append", n.Auth(w.appendNote))
+		mux.HandleFunc("POST /web/rename", n.Auth(w.rename))
 		mountFiles(w, mux)
 	}
 }
@@ -271,6 +272,40 @@ func (u *ui) appendNote(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	writeJSON(w, map[string]string{"ok": "1"})
 }
 
+// rename moves a note (kind "note") or a file (kind "file") to a new name.
+func (u *ui) rename(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
+	if !guarded(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		To   string `json:"to"`
+		Kind string `json:"kind"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.To = strings.Trim(strings.TrimSpace(req.To), "/")
+	u.n.Lock()
+	defer u.n.Unlock()
+	var err error
+	if req.Kind == "file" {
+		err = u.n.Store.RenameFile(req.Name, req.To, peer.Name)
+	} else {
+		req.Name, req.To = store.Canon(req.Name), store.Canon(req.To)
+		err = u.n.Store.Rename(req.Name, req.To, peer.Name)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	u.n.Logf("%s renamed %s to %s via web", peer.Name, req.Name, req.To)
+	u.n.NotifyChanged()
+	writeJSON(w, map[string]string{"name": req.To})
+}
+
 func (u *ui) del(w http.ResponseWriter, r *http.Request, peer ts.Peer) {
 	if !guarded(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -392,7 +427,7 @@ function f(){var q=document.getElementById('q').value.toLowerCase();document.que
 var noteTmpl = template.Must(template.New("note").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>{{if .New}}new{{else}}{{.Name}}{{end}} · np</title><style>` + css + `</style><main>
 <header><h1><a href="/">np</a></h1><small>{{.Node}}</small><span class=sp></span>
-{{if not .Edit}}<a class=btn href="/h/{{.Name}}">History</a><a class=btn href="?edit">Edit</a>{{end}}</header>
+{{if not .Edit}}<a class=btn href="/h/{{.Name}}">History</a><a class=btn href="?edit">Edit</a><button onclick="mv()">Rename</button>{{end}}</header>
 {{if .Edit}}
 <input id=name value="{{.Name}}" {{if not .New}}readonly{{else}}autofocus{{end}} placeholder="note name (add .json, .sh, .yaml… for non-markdown)">
 <div class=row></div>
@@ -409,6 +444,9 @@ function del(){if(!confirm('Delete {{.Name}}?'))return;post('/web/delete',{name:
 <form class=row onsubmit="return add()"><input id=a placeholder="add a line…" autocomplete=off><button class=pri>Add</button></form>
 <div id=msg></div>
 <script>
+function mv(){var to=prompt('New name for {{.Name}}:',{{.Name}});if(!to||to==={{.Name}})return;
+fetch('/web/rename',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'np'},body:JSON.stringify({name:{{.Name}},to:to,kind:'note'})})
+.then(function(r){return r.ok?r.json().then(function(j){location.href='/n/'+j.name}):r.text().then(function(m){document.getElementById('msg').textContent=m})})}
 function add(){var t=document.getElementById('a').value;if(!t.trim())return false;
 fetch('/web/append',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'np'},body:JSON.stringify({name:{{.Name}},content:t})})
 .then(function(r){return r.ok?location.reload():r.text().then(function(m){document.getElementById('msg').textContent=m})});return false}
@@ -419,7 +457,7 @@ var historyTmpl = template.Must(template.New("history").Parse(`<!doctype html><m
 <title>{{.Name}} history · np</title><style>` + css + `</style><main>
 <header><h1><a href="/">np</a></h1><small>{{.Node}}</small><span class=sp></span><a class=btn href="/n/{{.Name}}">Back</a></header>
 <h2 style="margin:0 0 8px;font-size:20px">{{.Name}}</h2>
-{{range .Versions}}<div class=ver><a href="/h/{{$.Name}}?v={{.Seq}}">v{{.Seq}}{{if .Deleted}} · deleted{{end}}</a><small class=stat>{{if .Added}}<span class=add>+{{.Added}}</span>{{end}} {{if .Removed}}<span class=del>−{{.Removed}}</span>{{end}}</small><small>{{.ModBy}}</small><small>{{.ModTime.Local.Format "Jan 2 15:04:05"}}</small><small>{{.Clock}}</small></div>{{end}}
+{{range .Versions}}<div class=ver><a href="/h/{{$.Name}}?v={{.Seq}}">v{{.Seq}}{{if .RenamedTo}} · renamed to {{.RenamedTo}}{{else if .Deleted}} · deleted{{else if .RenamedFrom}} · renamed from {{.RenamedFrom}}{{end}}</a><small class=stat>{{if .Added}}<span class=add>+{{.Added}}</span>{{end}} {{if .Removed}}<span class=del>−{{.Removed}}</span>{{end}}</small><small>{{.ModBy}}</small><small>{{.ModTime.Local.Format "Jan 2 15:04:05"}}</small><small>{{.Clock}}</small></div>{{end}}
 </main>`))
 
 var versionTmpl = template.Must(template.New("version").Parse(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">

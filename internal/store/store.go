@@ -8,11 +8,13 @@
 package store
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -35,6 +37,9 @@ type Version struct {
 	ModBy   string      `json:"by"`
 	Clock   clock.Clock `json:"clock"`
 	Deleted bool        `json:"deleted,omitempty"`
+	// RenamedFrom / RenamedTo mark the two ends of a rename.
+	RenamedFrom string `json:"from,omitempty"`
+	RenamedTo   string `json:"to,omitempty"`
 }
 
 // Meta is the synchronised state of one note.
@@ -46,6 +51,10 @@ type Meta struct {
 	ModBy   string      `json:"by"`
 	Deleted bool        `json:"deleted,omitempty"`
 	History []Version   `json:"history,omitempty"`
+	// RenamedFrom is set on a note created by a rename; RenamedTo on the
+	// tombstone it left behind. Informational once applied.
+	RenamedFrom string `json:"renamed_from,omitempty"`
+	RenamedTo   string `json:"renamed_to,omitempty"`
 	// HistoryDigest is filled only on the wire (index responses) so peers
 	// can tell whether their ledgers differ; see HistoryDigest().
 	HistoryDigest string `json:"hdigest,omitempty"`
@@ -666,9 +675,12 @@ func (s *Store) install(remote Meta, content []byte) error {
 	m.ModTime = remote.ModTime.UTC()
 	m.ModBy = remote.ModBy
 	m.Deleted = remote.Deleted
-	m.History = append(m.History, Version{Seq: len(m.History) + 1, Hash: m.Hash, ModTime: m.ModTime, ModBy: m.ModBy, Clock: m.Clock.Copy(), Deleted: m.Deleted})
+	m.RenamedFrom, m.RenamedTo = remote.RenamedFrom, remote.RenamedTo
+	m.History = append(m.History, Version{Seq: len(m.History) + 1, Hash: m.Hash, ModTime: m.ModTime, ModBy: m.ModBy, Clock: m.Clock.Copy(), Deleted: m.Deleted, RenamedFrom: remote.RenamedFrom, RenamedTo: remote.RenamedTo})
 	return nil
 }
+
+func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
 func readJSON(p string, v any) error {
 	b, err := os.ReadFile(p)

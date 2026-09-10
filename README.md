@@ -54,6 +54,7 @@ np log todo                 # history with vector clocks
 np show todo 2              # print version 2
 np diff todo                # what the latest version changed; np diff todo 3 (v2->v3); np diff todo 2 5
 np rm todo                  # deletion syncs as a tombstone
+np mv todo work/todo        # rename; history and identity follow (files too)
 
 np put ~/Pictures/cat.jpg   # share any file (name defaults to cat.jpg)
 np put video.mp4 trips/     # ...into a folder
@@ -113,7 +114,8 @@ such as a phone running Tailscale, to read, edit, create and delete notes.
 Markdown notes are rendered; other file types are shown as highlighted code.
 Every note has a History page listing its versions with the size of each
 change; a version page shows the diff from the previous one and can restore
-it as the new current content. Files have their own list
+it as the new current content. Notes and files can be renamed from their
+pages. Files have their own list
 with an upload box (photos from a phone, for instance); images, video,
 audio and small text files preview inline, everything else downloads.
 Edits are committed like local edits and fanned out to peers immediately.
@@ -129,7 +131,9 @@ Access uses the same tailnet identity rules as sync.
   binary, the newest modification time wins and the losing version is kept
   as `name.conflict-<node>-<time>.md` next to the winner, so nothing is
   lost. The merged result gets a fresh clock and propagates to every peer.
-- Deletes are tombstones, so they propagate too.
+- Deletes are tombstones, so they propagate too. A rename is a new record
+  that inherits the old clock and ledger plus a forward-pointing tombstone,
+  so `np log` continues across the rename on every machine.
 - Every version of every note is stored under `~/.np/history/`, and sync
   exchanges the versions a machine is missing, so history is the same on
   every machine.

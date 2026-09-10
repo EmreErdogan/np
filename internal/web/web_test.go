@@ -291,3 +291,27 @@ func TestHistoryDiff(t *testing.T) {
 		t.Fatal("v1 should not show a diff section")
 	}
 }
+
+func TestWebRename(t *testing.T) {
+	n, srv := setup(t)
+	n.Store.Write("a", []byte("x"))
+	if r := post(t, srv.URL+"/web/rename", `{"name":"a","to":"b/c","kind":"note"}`, true); r.StatusCode != 200 {
+		b, _ := io.ReadAll(r.Body)
+		t.Fatalf("rename: %d %s", r.StatusCode, b)
+	}
+	if m := n.Store.Get("b/c"); m == nil || m.ModBy != "phone" || m.RenamedFrom != "a" {
+		t.Fatalf("meta=%+v", m)
+	}
+	upload(t, srv.URL+"/web/upload", "file", "p.png", "img", true)
+	if r := post(t, srv.URL+"/web/rename", `{"name":"p.png","to":"pics/p.png","kind":"file"}`, true); r.StatusCode != 200 {
+		t.Fatalf("file rename: %d", r.StatusCode)
+	}
+	if m := n.Store.File("pics/p.png"); m == nil || !m.Have {
+		t.Fatalf("file=%+v", m)
+	}
+	resp, _ := http.Get(srv.URL + "/h/b/c")
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "renamed from a") {
+		t.Fatalf("history page: %s", body)
+	}
+}

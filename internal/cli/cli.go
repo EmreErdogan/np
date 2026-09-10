@@ -45,6 +45,7 @@ Notes:
   np view <name>         render a note in the terminal (markdown or code)
   np search <text>       find notes whose name or content contains text
   np rm <name>           delete a note (tombstone syncs to peers)
+  np mv <name> <new>     rename a note (or a file); history and identity follow
   np log <name>          version history
   np show <name> <seq>   print a historical version
   np diff <name> [seq | a b]
@@ -136,6 +137,8 @@ func run(cmd string, args []string) error {
 		return cmdView(n, args)
 	case "rm", "delete":
 		return cmdRm(n, args)
+	case "mv", "rename":
+		return cmdMv(n, args)
 	case "path":
 		return cmdPath(n, args)
 	case "put":
@@ -676,6 +679,30 @@ func localPath(n *proto.Node, arg string) (string, error) {
 	return "", fmt.Errorf("no note or file %q", arg)
 }
 
+// cmdMv renames a note, or a file when no note has the old name.
+func cmdMv(n *proto.Node, args []string) error {
+	if len(args) != 2 {
+		return errors.New("expected <name> <new-name>")
+	}
+	n.Store.Scan()
+	if m := n.Store.Get(store.Canon(args[0])); m != nil && !m.Deleted {
+		to := store.Canon(args[1])
+		if err := n.Store.Rename(m.Name, to, n.Self.Name); err != nil {
+			return err
+		}
+		fmt.Printf("%s -> %s\n", m.Name, to)
+		return nil
+	}
+	if m := n.Store.File(args[0]); m != nil && !m.Deleted {
+		if err := n.Store.RenameFile(args[0], args[1], n.Self.Name); err != nil {
+			return err
+		}
+		fmt.Printf("%s -> %s (file)\n", args[0], args[1])
+		return nil
+	}
+	return fmt.Errorf("no note or file %q", args[0])
+}
+
 func cmdPut(n *proto.Node, args []string) error {
 	if len(args) < 1 || len(args) > 2 {
 		return errors.New("expected <path> [name]")
@@ -787,9 +814,17 @@ func cmdLog(n *proto.Node, args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	for i := len(m.History) - 1; i >= 0; i-- {
 		v := m.History[i]
-		what := v.Hash[:8]
-		if v.Deleted {
+		what := v.Hash
+		if len(what) > 8 {
+			what = what[:8]
+		}
+		switch {
+		case v.RenamedTo != "":
+			what = "renamed to " + v.RenamedTo
+		case v.Deleted:
 			what = "deleted"
+		case v.RenamedFrom != "":
+			what += "  renamed from " + v.RenamedFrom
 		}
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", v.Seq, v.ModTime.Local().Format("2006-01-02 15:04:05"), v.ModBy, what, v.Clock)
 	}

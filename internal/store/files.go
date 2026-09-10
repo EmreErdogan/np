@@ -34,6 +34,9 @@ type FileMeta struct {
 	ModBy   string      `json:"by"`
 	Deleted bool        `json:"deleted,omitempty"`
 	Have    bool        `json:"have"`
+	// RenamedFrom / RenamedTo mark the two ends of a rename (see rename.go).
+	RenamedFrom string `json:"renamed_from,omitempty"`
+	RenamedTo   string `json:"renamed_to,omitempty"`
 }
 
 // DefaultAutoFetch is the size up to which file content is pulled without
@@ -403,7 +406,12 @@ func (s *Store) installFile(remote FileMeta, src io.Reader) error {
 	m.ModTime = remote.ModTime.UTC()
 	m.ModBy = remote.ModBy
 	m.Deleted = remote.Deleted
+	m.RenamedFrom, m.RenamedTo = remote.RenamedFrom, remote.RenamedTo
 	m.Have = false
+	if src == nil && s.carryFile(remote) {
+		m.Have = true
+		return nil
+	}
 	if remote.Deleted || src == nil {
 		// Tombstone or stub: whatever is on disk is an older version.
 		if err := os.Remove(s.filePath(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {

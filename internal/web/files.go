@@ -255,10 +255,11 @@ var fileTmpl = template.Must(template.New("file").Parse(`<!doctype html><meta ch
 {{else if eq .Kind "audio"}}<audio controls src="/raw/{{.Name}}"></audio>
 {{else if eq .Kind "text"}}<pre>{{.Text}}</pre>
 {{else}}<p class=empty>No preview for this type.</p>{{end}}
-<div class=row style="margin-top:24px"><span class=sp></span><button class=danger onclick="del()">Delete</button></div>
+<div class=row style="margin-top:24px"><button onclick="mv()">Rename</button><span class=sp></span><button class=danger onclick="del()">Delete</button></div>
 <script>
 function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'np'},body:JSON.stringify(b)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t)})})}
 function fetchIt(){var b=document.getElementById('fb');b.disabled=true;b.textContent='Fetching…';post('/web/fetch',{name:{{.Name}}}).then(function(){location.reload()}).catch(function(e){b.disabled=false;b.textContent='Fetch';document.getElementById('msg').textContent=e.message})}
+function mv(){var to=prompt('New name for {{.Name}}:',{{.Name}});if(!to||to==={{.Name}})return;post('/web/rename',{name:{{.Name}},to:to,kind:'file'}).then(function(j){location.href='/f/'+j.name}).catch(function(e){document.getElementById('msg').textContent=e.message})}
 function del(){if(!confirm('Delete {{.Name}} everywhere?'))return;post('/web/delete-file',{name:{{.Name}}}).then(function(){location.href='/'}).catch(function(e){document.getElementById('msg').textContent=e.message})}
 </script>
 </main>`))
