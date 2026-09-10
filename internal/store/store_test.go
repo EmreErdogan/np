@@ -345,3 +345,71 @@ func TestScanReloadsIndexWrittenByAnotherProcess(t *testing.T) {
 		t.Fatal("daemon's own note lost")
 	}
 }
+
+func TestAddVersionsUnionAndOrder(t *testing.T) {
+	a, b := open(t, "a"), open(t, "b")
+	a.Write("n", []byte("v1"))
+	time.Sleep(2 * time.Millisecond)
+	a.Write("n", []byte("v2"))
+	time.Sleep(2 * time.Millisecond)
+	a.Write("n", []byte("v3"))
+	transfer(t, a, b, "n") // b has only v3
+	if len(b.Get("n").History) != 1 {
+		t.Fatal("b should have one version")
+	}
+	if HistoryDigest(a.Get("n")) == HistoryDigest(b.Get("n")) {
+		t.Fatal("digests should differ")
+	}
+	here, there := b.MissingVersions("n", a.Get("n").History)
+	if len(here) != 2 || len(there) != 0 {
+		t.Fatalf("missing here=%d there=%d", len(here), len(there))
+	}
+	// Without snapshots nothing is added.
+	if n, _ := b.AddVersions("n", here); n != 0 {
+		t.Fatal("should skip versions without content")
+	}
+	for _, v := range here {
+		data, _ := a.Snapshot("n", v.Hash)
+		if err := b.PutSnapshot("n", v.Hash, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.PutSnapshot("n", here[0].Hash, []byte("wrong")); err == nil {
+		t.Fatal("wrong content should be rejected")
+	}
+	n, err := b.AddVersions("n", here)
+	if err != nil || n != 2 {
+		t.Fatal(n, err)
+	}
+	h := b.Get("n").History
+	if len(h) != 3 || h[0].Seq != 1 || h[2].Seq != 3 || h[2].Clock.String() != b.Get("n").Clock.String() {
+		t.Fatalf("history=%+v", h)
+	}
+	if got, _ := b.Snapshot("n", h[0].Hash); string(got) != "v1" {
+		t.Fatalf("oldest=%q", got)
+	}
+	if HistoryDigest(a.Get("n")) != HistoryDigest(b.Get("n")) {
+		t.Fatal("digests should now match")
+	}
+	// Idempotent.
+	if n, _ := b.AddVersions("n", a.Get("n").History); n != 0 {
+		t.Fatal("re-adding should add nothing")
+	}
+}
+
+func TestAddVersionsKeepsCurrentLast(t *testing.T) {
+	// A pulled older version with a later mtime (clock skew) must not
+	// displace the current version from the end of the ledger.
+	a, b := open(t, "a"), open(t, "b")
+	a.Write("n", []byte("cur"))
+	transfer(t, a, b, "n")
+	skewed := Version{Hash: hashOf([]byte("old")), ModTime: time.Now().Add(time.Hour), ModBy: "x", Clock: clock.Clock{"x": 1}}
+	b.PutSnapshot("n", skewed.Hash, []byte("old"))
+	if n, _ := b.AddVersions("n", []Version{skewed}); n != 1 {
+		t.Fatal("should add")
+	}
+	h := b.Get("n").History
+	if h[len(h)-1].Hash != b.Get("n").Hash {
+		t.Fatalf("current not last: %+v", h)
+	}
+}

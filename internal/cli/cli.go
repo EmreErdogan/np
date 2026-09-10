@@ -1050,6 +1050,9 @@ func printReport(rep proto.SyncReport) {
 	for _, s := range rep.Pushed {
 		fmt.Println("  ->", s)
 	}
+	if rep.Versions > 0 || rep.VersionsPushed > 0 {
+		fmt.Printf("  history: %d version(s) received, %d sent\n", rep.Versions, rep.VersionsPushed)
+	}
 	for _, s := range rep.NotFetched {
 		fmt.Println("  .. not fetched:", s, "(np get to download)")
 	}

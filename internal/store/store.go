@@ -46,6 +46,9 @@ type Meta struct {
 	ModBy   string      `json:"by"`
 	Deleted bool        `json:"deleted,omitempty"`
 	History []Version   `json:"history,omitempty"`
+	// HistoryDigest is filled only on the wire (index responses) so peers
+	// can tell whether their ledgers differ; see HistoryDigest().
+	HistoryDigest string `json:"hdigest,omitempty"`
 }
 
 // Index is index.json.

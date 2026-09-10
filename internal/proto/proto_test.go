@@ -324,3 +324,69 @@ func TestSyncFilesStubDoesNotDowngradeHolder(t *testing.T) {
 		t.Fatalf("hub refill: %+v", rep)
 	}
 }
+
+func TestSyncHistoryUnion(t *testing.T) {
+	ctx := context.Background()
+	hub := newNode(t, "hub", "emre@example.com")
+	hubPeer := serve(t, hub, "emre@example.com")
+	a := newNode(t, "a", "emre@example.com")
+	b := newNode(t, "b", "emre@example.com")
+	a.Store.Config.Port = hub.Store.Config.Port
+	b.Store.Config.Port = hub.Store.Config.Port
+
+	// a makes three versions before ever syncing.
+	for _, v := range []string{"v1", "v2", "v3"} {
+		a.Store.Write("n", []byte(v))
+		time.Sleep(2 * time.Millisecond)
+	}
+	rep, err := a.Sync(ctx, hubPeer)
+	if err != nil || len(rep.Pushed) != 1 || rep.VersionsPushed != 2 {
+		t.Fatalf("a: %+v %v", rep, err)
+	}
+	if len(hub.Store.Get("n").History) != 3 {
+		t.Fatalf("hub history=%d", len(hub.Store.Get("n").History))
+	}
+	// b pulls the note and the whole ledger.
+	rep, _ = b.Sync(ctx, hubPeer)
+	if len(rep.Pulled) != 1 || rep.Versions != 2 {
+		t.Fatalf("b: %+v", rep)
+	}
+	hb := b.Store.Get("n").History
+	if len(hb) != 3 || hb[2].Hash != b.Store.Get("n").Hash {
+		t.Fatalf("b history=%+v", hb)
+	}
+	if got, _ := b.Store.Snapshot("n", hb[0].Hash); string(got) != "v1" {
+		t.Fatalf("b oldest=%q", got)
+	}
+	// b edits twice; a ends up with all five.
+	b.Store.Write("n", []byte("v4"))
+	time.Sleep(2 * time.Millisecond)
+	b.Store.Write("n", []byte("v5"))
+	b.Sync(ctx, hubPeer)
+	rep, _ = a.Sync(ctx, hubPeer)
+	if len(rep.Pulled) != 1 || rep.Versions != 1 {
+		t.Fatalf("a second: %+v", rep)
+	}
+	for _, n := range []*Node{hub, a, b} {
+		h := n.Store.Get("n").History
+		if len(h) != 5 || h[4].Hash != n.Store.Get("n").Hash {
+			t.Fatalf("%s history=%d", n.Self.Name, len(h))
+		}
+		for i, want := range []string{"v1", "v2", "v3", "v4", "v5"} {
+			if got, _ := n.Store.Snapshot("n", h[i].Hash); string(got) != want {
+				t.Fatalf("%s v%d=%q", n.Self.Name, i+1, got)
+			}
+		}
+	}
+	// Converged: nothing moves.
+	if rep, _ = a.Sync(ctx, hubPeer); rep.Versions+rep.VersionsPushed+len(rep.Pulled)+len(rep.Pushed) != 0 {
+		t.Fatalf("not idempotent: %+v", rep)
+	}
+	// Deletion history travels too.
+	b.Store.Delete("n")
+	b.Sync(ctx, hubPeer)
+	a.Sync(ctx, hubPeer)
+	if h := a.Store.Get("n").History; len(h) != 6 || !h[5].Deleted {
+		t.Fatalf("a after delete: %+v", h)
+	}
+}

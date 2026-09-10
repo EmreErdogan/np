@@ -130,7 +130,9 @@ Access uses the same tailnet identity rules as sync.
   as `name.conflict-<node>-<time>.md` next to the winner, so nothing is
   lost. The merged result gets a fresh clock and propagates to every peer.
 - Deletes are tombstones, so they propagate too.
-- Every version of every note is stored under `~/.np/history/`.
+- Every version of every note is stored under `~/.np/history/`, and sync
+  exchanges the versions a machine is missing, so history is the same on
+  every machine.
 
 ## Config
 

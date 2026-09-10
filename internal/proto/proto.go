@@ -177,6 +177,7 @@ func (n *Node) Handler() http.Handler {
 		writeJSON(w, Apply{Result: res})
 	}))
 	n.mountFiles(mux)
+	n.mountHistory(mux)
 	for _, m := range n.Mount {
 		m(mux)
 	}
@@ -189,6 +190,7 @@ func (n *Node) index() []store.Meta {
 	for _, m := range all {
 		c := *m
 		c.History = nil
+		c.HistoryDigest = store.HistoryDigest(m)
 		out = append(out, c)
 	}
 	return out
@@ -292,13 +294,15 @@ func (n *Node) PingPeer(ctx context.Context, p ts.Peer) (Ping, error) {
 
 // SyncReport summarises one sync run.
 type SyncReport struct {
-	Peer       string
-	Pulled     []string
-	Pushed     []string
-	Merged     []string // pulled notes that were three-way merged with a local edit
-	NotFetched []string // files whose metadata arrived without content
-	Conflicts  []string
-	Errors     []string
+	Peer           string
+	Pulled         []string
+	Pushed         []string
+	Merged         []string // pulled notes that were three-way merged with a local edit
+	NotFetched     []string // files whose metadata arrived without content
+	Versions       int      // historical versions pulled
+	VersionsPushed int
+	Conflicts      []string
+	Errors         []string
 }
 
 func (r SyncReport) String() string {
@@ -308,6 +312,9 @@ func (r SyncReport) String() string {
 	}
 	if len(r.NotFetched) > 0 {
 		s += fmt.Sprintf(", %d not fetched", len(r.NotFetched))
+	}
+	if r.Versions+r.VersionsPushed > 0 {
+		s += fmt.Sprintf(", history +%d/-%d", r.Versions, r.VersionsPushed)
 	}
 	if len(r.Conflicts) > 0 {
 		s += fmt.Sprintf(", %d conflict(s)", len(r.Conflicts))
@@ -339,6 +346,9 @@ func (r SyncReport) Detail() string {
 func (n *Node) Sync(ctx context.Context, p ts.Peer) (SyncReport, error) {
 	rep := SyncReport{Peer: p.Name}
 	if err := n.syncNotes(ctx, p, &rep); err != nil {
+		return rep, err
+	}
+	if err := n.syncHistory(ctx, p, &rep); err != nil {
 		return rep, err
 	}
 	if err := n.syncFiles(ctx, p, &rep); err != nil {
