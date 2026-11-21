@@ -29,40 +29,43 @@ import (
 	"github.com/EmreErdogan/np/internal/web"
 )
 
-const usage = `np - share notes across your tailnet
+const usage = `np - share notes and files across your tailnet
 
-Notes:
-  np new <name>          create a note in $EDITOR (or from stdin)
-  np edit <name>         edit a note
+Files (text or anything else; "todo" is short for todo.md):
+  np new <name>          create a text file in $EDITOR (or from stdin)
+  np edit <name>         edit a text file
   np add [-t] <name> [text]
-                         append text (or stdin, or an editor buffer) to a note;
-                         -t prefixes a timestamp. Creates the note if missing.
-  np ls [dir] [--local]  list notes as a tree, optionally under dir; --local skips the hub
+                         append text (or stdin, or an editor buffer);
+                         -t prefixes a timestamp. Creates the file if missing.
+  np put [-f] <path> [name|dir/]
+                         copy any file in (name defaults to the file's base
+                         name); -f replaces an existing file
+  np ls [dir] [--local]  list files as a tree, optionally under dir; --local skips the hub
   np ls --flat           plain list; --path lists absolute paths instead of names
-  np path [-c] <name>    print the absolute path of a note or file; -c copies it
-                         to the clipboard (over SSH: your local terminal's, via OSC 52)
-  np cat <name>          print a note
-  np view <name>         render a note in the terminal (markdown or code)
-  np search <text>       find notes whose name or content contains text
-  np rm <name>           delete a note (tombstone syncs to peers)
-  np mv <name> <new>     rename a note (or a file); history and identity follow
+  np path [-c] <name>    print the absolute path of a file; -c copies it to the
+                         clipboard (over SSH: your local terminal's, via OSC 52)
+  np cat <name>          print a file
+  np view <name>         render a text file in the terminal (markdown or code)
+  np search <text>       find files whose name or text content contains text
+  np rm <name>           delete a file (tombstone syncs to peers)
+  np mv <name> <new>     rename; history and identity follow. "np mv a dir/"
+                         moves into a folder, the extension is kept if omitted
   np log <name>          version history
   np show <name> <seq>   print a historical version
   np diff <name> [seq | a b]
                          changes in the latest version (or in version seq,
                          or between versions a and b); unified diff, coloured on a terminal
 
-Files (any type; synced lazily):
-  np put <path> [name]   copy a file in (name defaults to the file's base name;
-                         use dir/name to place it in a folder)
+Text and binary:
+  Text files up to 1 MB keep every version, merge concurrent edits and are
+  on every machine. Anything else is a blob: no history, newest wins (the
+  other copy is kept as *.conflict-*), and content is synced lazily:
   np get <name> [-o <path>]
-                         fetch a file's content from the hub or a peer that has
-                         it; -o also copies it to path
-  np drop <name>         remove the local copy but keep knowing about the file
-  np rm <name>           delete a file (when no note has that name)
-  Files are listed at the end of np ls. Every machine learns about every
-  file; content below auto_fetch_bytes (2 MB, config) follows automatically,
-  larger files only on np get, in the web UI, or on nodes with keep_all.
+                         fetch a blob's content from the hub or a peer that
+                         has it; -o also copies it to path
+  np drop <name>         remove the local copy of a blob but keep knowing about it
+  Blobs up to auto_fetch_bytes (2 MB, config) follow automatically, larger
+  ones only on np get, in the web UI, or on nodes with keep_all.
 
 Sync:
   np peers               tailnet machines and whether they run np
@@ -71,20 +74,19 @@ Sync:
   np sync --all          sync with every online peer running np
   np serve               accept syncs and serve the web UI (foreground)
   np daemon              serve, auto-sync with hub (or all peers), fan out changes
-  np status              local identity, hub, note count
+  np status              local identity, hub, file count
   np version
   np upgrade [--check]   install the latest release from GitHub
 
 The daemon also serves a phone-friendly web UI at http://<tailscale-ip>:7373/
-for reading and editing notes from any device on the tailnet.
+for browsing, searching, reading, editing and uploading from any device on
+the tailnet.
 
 Service (runs "np daemon" in the background at login):
   np service install | uninstall | restart | status
 
-Notes live in ~/.np/notes and files in ~/.np/files (override with NP_DIR). A name
-without an extension is markdown ("todo" -> todo.md); names like config.json
-or deploy.sh are kept as-is and shown as code. Any editor works; np records
-external edits on the next command.
+Everything lives in ~/.np/files (override with NP_DIR) under its real name.
+Any editor works; np records external edits on the next command.
 `
 
 // Version is set at build time via -ldflags "-X .../cli.Version=v1.2.3".
@@ -185,6 +187,9 @@ func openNode(ctx context.Context) (*proto.Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, line := range s.Notices {
+		fmt.Fprintln(os.Stderr, "np:", line)
+	}
 	n := &proto.Node{Store: s, Self: self, Log: log.New(os.Stderr, "", log.Ltime)}
 	n.Mount = []func(*http.ServeMux){web.Mount(n)}
 	return n, nil
@@ -194,27 +199,45 @@ func oneArg(args []string, what string) (string, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("expected %s", what)
 	}
-	if what == "<name>" {
-		return store.Canon(args[0]), nil
-	}
 	return args[0], nil
 }
 
+// find scans and resolves what the user typed to an existing file: the
+// exact name, or the markdown shorthand ("todo" for todo.md). Tombstones
+// are found only when deleted is set (history commands).
+func find(n *proto.Node, arg string, deleted bool) (*store.Meta, error) {
+	if _, err := n.Store.Scan(); err != nil {
+		return nil, err
+	}
+	arg = strings.Trim(arg, "/")
+	if m := n.Store.Get(n.Store.Resolve(arg)); m != nil && (deleted || !m.Deleted) {
+		return m, nil
+	}
+	return nil, fmt.Errorf("no file %q", arg)
+}
+
 func cmdEdit(n *proto.Node, args []string, create bool) error {
-	name, err := oneArg(args, "<name>")
+	arg, err := oneArg(args, "<name>")
 	if err != nil {
 		return err
+	}
+	name := ""
+	m, _ := find(n, arg, false)
+	switch {
+	case m != nil:
+		name = m.Name
+		if !m.Have {
+			return fmt.Errorf("%s is not on this machine yet (np get %s)", name, name)
+		}
+	case !create:
+		return fmt.Errorf("no file %q (use `np new %s`)", arg, arg)
+	default:
+		name = store.DefaultName(strings.Trim(arg, "/"))
 	}
 	if err := store.ValidName(name); err != nil {
 		return err
 	}
-	n.Store.Scan()
-	m := n.Store.Get(name)
-	exists := m != nil && !m.Deleted
-	if !create && !exists {
-		return fmt.Errorf("no note %q (use `np new %s`)", name, name)
-	}
-	if fi, _ := os.Stdin.Stat(); fi != nil && fi.Mode()&os.ModeCharDevice == 0 {
+	if stdinPiped() {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return err
@@ -225,8 +248,9 @@ func cmdEdit(n *proto.Node, args []string, create bool) error {
 	if err != nil {
 		return err
 	}
-	if !exists {
-		if err := os.WriteFile(p, []byte("# "+name+"\n\n"), 0o644); err != nil {
+	if m == nil && store.IsMarkdown(name) {
+		title := strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
+		if err := os.WriteFile(p, []byte("# "+title+"\n\n"), 0o644); err != nil {
 			return err
 		}
 	}
@@ -237,36 +261,34 @@ func cmdEdit(n *proto.Node, args []string, create bool) error {
 	if err != nil {
 		return err
 	}
-	if len(changed) == 0 {
+	if cur := n.Store.Get(name); len(changed) == 0 || cur == nil {
 		fmt.Println("no changes")
 	} else {
-		fmt.Printf("saved %s (%s)\n", name, n.Store.Get(name).Clock)
+		fmt.Printf("saved %s (%s)\n", name, cur.Clock)
 	}
 	return nil
 }
 
-// hubStates fetches the hub's index and classifies local notes against it.
+// hubStates fetches the hub's index and classifies local files against it.
 // Returns nil (and a reason) when there is no hub or it cannot be reached.
-func hubStates(ctx context.Context, n *proto.Node) (notes, files map[string]proto.SyncState, reason string) {
+func hubStates(ctx context.Context, n *proto.Node) (states map[string]proto.SyncState, reason string) {
 	if n.Store.Config.Hub == "" {
-		return nil, nil, "no hub set"
+		return nil, "no hub set"
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	p, err := targetPeer(ctx, n, nil)
 	if err != nil {
-		return nil, nil, err.Error()
+		return nil, err.Error()
 	}
 	remote, err := n.RemoteIndex(ctx, p)
 	if err != nil {
-		return nil, nil, fmt.Sprintf("hub %s unreachable", p.Name)
+		if strings.Contains(err.Error(), "np upgrade") {
+			return nil, err.Error()
+		}
+		return nil, fmt.Sprintf("hub %s unreachable", p.Name)
 	}
-	notes = proto.Compare(n.Store.List(true), remote)
-	remoteFiles, err := n.RemoteFiles(ctx, p)
-	if err != nil { // an older np on the hub: note states are still valid
-		return notes, nil, ""
-	}
-	return notes, proto.CompareFiles(n.Store.Files(true), remoteFiles), ""
+	return proto.Compare(n.Store.List(true), remote), ""
 }
 
 // stdinPiped reports whether stdin carries data rather than a terminal.
@@ -302,7 +324,10 @@ func cmdAdd(n *proto.Node, args []string) error {
 	if len(args) == 0 {
 		return errors.New("expected <name> [text]")
 	}
-	name := store.Canon(args[0])
+	name := store.DefaultName(strings.Trim(args[0], "/"))
+	if m, _ := find(n, args[0], false); m != nil {
+		name = m.Name
+	}
 	if err := store.ValidName(name); err != nil {
 		return err
 	}
@@ -360,94 +385,21 @@ func cmdList(ctx context.Context, n *proto.Node, args []string) error {
 		case "--path", "-p":
 			flat, paths = true, true
 		default:
-			prefix = strings.TrimSuffix(a, "/")
+			prefix = strings.Trim(a, "/")
 		}
 	}
-	var states, fileStates map[string]proto.SyncState
+	var states map[string]proto.SyncState
 	reason := "skipped"
 	if !local {
-		states, fileStates, reason = hubStates(ctx, n)
+		states, reason = hubStates(ctx, n)
 	}
-	// Build the row set: local notes plus hub-only notes.
+	// Build the row set: local files plus hub-only ones.
 	type row struct {
-		name, when, by, state string
+		name, shown, size, when, by, state string
 	}
 	var rows []row
 	listed := map[string]bool{}
 	for _, m := range n.Store.List(false) {
-		listed[m.Name] = true
-		st := ""
-		if states != nil {
-			st = string(states[m.Name])
-		}
-		rows = append(rows, row{m.Name, m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy, st})
-	}
-	for name, st := range states {
-		if !listed[name] && st == proto.Behind {
-			rows = append(rows, row{name, "", "", "behind (hub only)"})
-		}
-	}
-	shown := func(r row) string {
-		if paths && listed[r.name] {
-			return n.Store.LocalPath(r.name)
-		}
-		return r.name
-	}
-	if prefix != "" {
-		var kept []row
-		for _, r := range rows {
-			if r.name == prefix || strings.HasPrefix(r.name, prefix+"/") {
-				kept = append(kept, r)
-			}
-		}
-		rows = kept
-	}
-	// Directories first, then notes, at every level.
-	sort.Slice(rows, func(i, j int) bool { return treeLess(rows[i].name, rows[j].name) })
-
-	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	lastDir := ""
-	for _, r := range rows {
-		name, indent := r.name, ""
-		if !flat {
-			dir := ""
-			if i := strings.LastIndex(r.name, "/"); i >= 0 {
-				dir, name = r.name[:i], r.name[i+1:]
-			}
-			if dir != lastDir {
-				printDirHeaders(tw, lastDir, dir)
-				lastDir = dir
-			}
-			indent = strings.Repeat("  ", strings.Count(dir, "/")+boolInt(dir != ""))
-		}
-		if paths {
-			name = shown(r)
-		}
-		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\n", indent, name, r.when, r.by, r.state)
-	}
-	if err := tw.Flush(); err != nil {
-		return err
-	}
-	if err := listFiles(n, prefix, flat, paths, fileStates); err != nil {
-		return err
-	}
-	// Without a hub (typically on the hub itself) there is nothing to compare
-	// against; the state column stays empty and that is not an error.
-	if states == nil && reason != "skipped" && n.Store.Config.Hub != "" {
-		fmt.Fprintln(os.Stderr, "sync state unavailable:", reason)
-	}
-	return nil
-}
-
-// listFiles prints the files block of np ls: name, size, date, author, and
-// the hub state ("not fetched" when only the metadata is here).
-func listFiles(n *proto.Node, prefix string, flat, paths bool, states map[string]proto.SyncState) error {
-	type row struct {
-		name, size, when, by, state string
-	}
-	var rows []row
-	listed := map[string]bool{}
-	for _, m := range n.Store.Files(false) {
 		listed[m.Name] = true
 		st := ""
 		if states != nil {
@@ -459,15 +411,15 @@ func listFiles(n *proto.Node, prefix string, flat, paths bool, states map[string
 			}
 			st += "not fetched"
 		}
-		name := m.Name
+		shown := ""
 		if paths && m.Have {
-			name = n.Store.FileLocalPath(m.Name)
+			shown = n.Store.LocalPath(m.Name)
 		}
-		rows = append(rows, row{name, store.FileSize(m.Size), m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy, st})
+		rows = append(rows, row{m.Name, shown, store.FileSize(m.Size), m.ModTime.Local().Format("2006-01-02 15:04"), m.ModBy, st})
 	}
 	for name, st := range states {
 		if !listed[name] && st == proto.Behind {
-			rows = append(rows, row{name, "", "", "", "behind (hub only)"})
+			rows = append(rows, row{name: name, state: "behind (hub only)"})
 		}
 	}
 	if prefix != "" {
@@ -479,12 +431,9 @@ func listFiles(n *proto.Node, prefix string, flat, paths bool, states map[string
 		}
 		rows = kept
 	}
-	if len(rows) == 0 {
-		return nil
-	}
+	// Directories first, then files, at every level.
 	sort.Slice(rows, func(i, j int) bool { return treeLess(rows[i].name, rows[j].name) })
-	fmt.Println()
-	fmt.Println("files:")
+
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	lastDir := ""
 	for _, r := range rows {
@@ -500,9 +449,20 @@ func listFiles(n *proto.Node, prefix string, flat, paths bool, states map[string
 			}
 			indent = strings.Repeat("  ", strings.Count(dir, "/")+boolInt(dir != ""))
 		}
+		if r.shown != "" {
+			name = r.shown
+		}
 		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\t%s\n", indent, name, r.size, r.when, r.by, r.state)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	// Without a hub (typically on the hub itself) there is nothing to compare
+	// against; the state column stays empty and that is not an error.
+	if states == nil && reason != "skipped" && n.Store.Config.Hub != "" {
+		fmt.Fprintln(os.Stderr, "sync state unavailable:", reason)
+	}
+	return nil
 }
 
 func boolInt(b bool) int {
@@ -527,12 +487,12 @@ func printDirHeaders(w io.Writer, prev, dir string) {
 		common++
 	}
 	for i := common; i < len(parts); i++ {
-		fmt.Fprintf(w, "%s%s/\t\t\t\n", strings.Repeat("  ", i), parts[i])
+		fmt.Fprintf(w, "%s%s/\t\t\t\t\n", strings.Repeat("  ", i), parts[i])
 	}
 }
 
 // treeLess orders paths so that, within each directory, subdirectories come
-// before notes and everything is alphabetical.
+// before files and everything is alphabetical.
 func treeLess(a, b string) bool {
 	as, bs := strings.Split(a, "/"), strings.Split(b, "/")
 	for i := 0; i < len(as) && i < len(bs); i++ {
@@ -552,59 +512,60 @@ func cmdSearch(n *proto.Node, args []string) error {
 	if len(args) == 0 {
 		return errors.New("expected <text>")
 	}
-	needle := strings.ToLower(strings.Join(args, " "))
 	if _, err := n.Store.Scan(); err != nil {
 		return err
 	}
-	found := 0
-	for _, m := range n.Store.List(false) {
-		data, err := n.Store.Read(m.Name)
-		if err != nil {
-			return err
-		}
-		nameHit := strings.Contains(strings.ToLower(m.Name), needle)
-		var hits []string
-		for i, line := range strings.Split(string(data), "\n") {
-			if strings.Contains(strings.ToLower(line), needle) {
-				hits = append(hits, fmt.Sprintf("  %d: %s", i+1, strings.TrimSpace(line)))
-			}
-		}
-		if !nameHit && len(hits) == 0 {
-			continue
-		}
-		found++
-		fmt.Println(m.Name)
-		for _, h := range hits {
-			fmt.Println(h)
+	hits, _ := n.Store.Search(strings.Join(args, " "), 0, 0)
+	for _, h := range hits {
+		fmt.Println(h.Name)
+		for _, l := range h.Lines {
+			fmt.Printf("  %d: %s\n", l.N, l.Text)
 		}
 	}
-	if found == 0 {
+	if len(hits) == 0 {
 		fmt.Fprintln(os.Stderr, "no matches")
 	}
 	return nil
 }
 
+// held resolves arg to a file whose content is on this machine.
+func held(n *proto.Node, args []string) (*store.Meta, error) {
+	arg, err := oneArg(args, "<name>")
+	if err != nil {
+		return nil, err
+	}
+	m, err := find(n, arg, false)
+	if err != nil {
+		return nil, err
+	}
+	if !m.Have {
+		return nil, fmt.Errorf("%s is not on this machine yet (np get %s)", m.Name, m.Name)
+	}
+	return m, nil
+}
+
 func cmdCat(n *proto.Node, args []string) error {
-	name, err := oneArg(args, "<name>")
+	m, err := held(n, args)
 	if err != nil {
 		return err
 	}
-	data, err := n.Store.Read(name)
+	f, err := n.Store.OpenFile(m.Name)
 	if err != nil {
 		return err
 	}
-	_, err = os.Stdout.Write(data)
+	defer f.Close()
+	_, err = io.Copy(os.Stdout, f)
 	return err
 }
 
 func cmdView(n *proto.Node, args []string) error {
-	name, err := oneArg(args, "<name>")
+	m, err := held(n, args)
 	if err != nil {
 		return err
 	}
-	data, err := n.Store.Read(name)
-	if err != nil {
-		return err
+	data, ok := n.Store.ReadText(m.Name)
+	if !ok {
+		return fmt.Errorf("%s is not text; open it with: np path %s", m.Name, m.Name)
 	}
 	if fi, _ := os.Stdout.Stat(); fi != nil && fi.Mode()&os.ModeCharDevice == 0 {
 		_, err = os.Stdout.Write(data) // piped: no escape codes
@@ -615,26 +576,27 @@ func cmdView(n *proto.Node, args []string) error {
 		width = c
 	}
 	dark := os.Getenv("NP_THEME") != "light"
-	return render.Terminal(os.Stdout, name, data, width, dark)
+	return render.Terminal(os.Stdout, m.Name, data, width, dark)
 }
 
 func cmdRm(n *proto.Node, args []string) error {
-	if len(args) != 1 {
-		return errors.New("expected <name>")
+	arg, err := oneArg(args, "<name>")
+	if err != nil {
+		return err
 	}
-	n.Store.Scan()
-	name := store.Canon(args[0])
-	if m := n.Store.Get(name); m != nil && !m.Deleted {
-		return n.Store.Delete(name)
+	m, err := find(n, arg, false)
+	if err != nil {
+		return err
 	}
-	if m := n.Store.File(args[0]); m != nil && !m.Deleted {
-		return n.Store.DeleteFile(args[0], n.Self.Name)
+	name := m.Name
+	if err := n.Store.Delete(name); err != nil {
+		return err
 	}
-	return fmt.Errorf("no note or file %q", args[0])
+	fmt.Println("deleted", name)
+	return nil
 }
 
-// cmdPath prints (or copies) the absolute path of a note or, failing that,
-// a file with that name.
+// cmdPath prints (or copies) the absolute path of a file.
 func cmdPath(n *proto.Node, args []string) error {
 	clip := false
 	var rest []string
@@ -648,11 +610,11 @@ func cmdPath(n *proto.Node, args []string) error {
 	if len(rest) != 1 {
 		return errors.New("expected [-c] <name>")
 	}
-	n.Store.Scan()
-	p, err := localPath(n, rest[0])
+	m, err := held(n, rest)
 	if err != nil {
 		return err
 	}
+	p := n.Store.LocalPath(m.Name)
 	if !clip {
 		fmt.Println(p)
 		return nil
@@ -666,92 +628,91 @@ func cmdPath(n *proto.Node, args []string) error {
 	return nil
 }
 
-func localPath(n *proto.Node, arg string) (string, error) {
-	if m := n.Store.Get(store.Canon(arg)); m != nil && !m.Deleted {
-		return n.Store.LocalPath(m.Name), nil
-	}
-	if m := n.Store.File(arg); m != nil && !m.Deleted {
-		if !m.Have {
-			return "", fmt.Errorf("%s is not on this machine yet (np get %s)", arg, arg)
-		}
-		return n.Store.FileLocalPath(m.Name), nil
-	}
-	return "", fmt.Errorf("no note or file %q", arg)
-}
-
-// cmdMv renames a note, or a file when no note has the old name.
+// cmdMv renames a file.
 func cmdMv(n *proto.Node, args []string) error {
 	if len(args) != 2 {
 		return errors.New("expected <name> <new-name>")
 	}
-	n.Store.Scan()
-	if m := n.Store.Get(store.Canon(args[0])); m != nil && !m.Deleted {
-		to := store.Canon(args[1])
-		if err := n.Store.Rename(m.Name, to, n.Self.Name); err != nil {
-			return err
-		}
-		fmt.Printf("%s -> %s\n", m.Name, to)
-		return nil
+	m, err := find(n, args[0], false)
+	if err != nil {
+		return err
 	}
-	if m := n.Store.File(args[0]); m != nil && !m.Deleted {
-		if err := n.Store.RenameFile(args[0], args[1], n.Self.Name); err != nil {
-			return err
-		}
-		fmt.Printf("%s -> %s (file)\n", args[0], args[1])
-		return nil
+	from, to := m.Name, store.RenameTarget(m.Name, args[1])
+	if err := n.Store.Rename(from, to, n.Self.Name); err != nil {
+		return err
 	}
-	return fmt.Errorf("no note or file %q", args[0])
+	fmt.Printf("%s -> %s\n", from, to)
+	return nil
 }
 
 func cmdPut(n *proto.Node, args []string) error {
-	if len(args) < 1 || len(args) > 2 {
-		return errors.New("expected <path> [name]")
+	force := false
+	var rest []string
+	for _, a := range args {
+		if a == "-f" || a == "--force" {
+			force = true
+		} else {
+			rest = append(rest, a)
+		}
 	}
-	src, err := os.Open(args[0])
+	if len(rest) < 1 || len(rest) > 2 {
+		return errors.New("expected [-f] <path> [name|dir/]")
+	}
+	src, err := os.Open(rest[0])
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-	name := filepath.Base(args[0])
-	if len(args) == 2 {
-		if strings.HasSuffix(args[1], "/") { // a folder: keep the base name
-			name = strings.Trim(args[1], "/") + "/" + name
+	name := filepath.Base(rest[0])
+	if len(rest) == 2 {
+		if strings.HasSuffix(rest[1], "/") { // a folder: keep the base name
+			name = strings.Trim(rest[1], "/") + "/" + name
 		} else {
-			name = strings.Trim(args[1], "/")
+			name = strings.Trim(rest[1], "/")
 		}
 	}
-	if err := store.ValidFileName(name); err != nil {
+	if err := store.ValidName(name); err != nil {
 		return err
 	}
-	if err := n.Store.PutFile(name, src, n.Self.Name); err != nil {
+	if _, err := n.Store.Scan(); err != nil {
 		return err
 	}
-	m := n.Store.File(name)
-	fmt.Printf("%s (%s)\n", name, store.FileSize(m.Size))
+	if cur := n.Store.Get(name); cur != nil && !cur.Deleted && !force {
+		return fmt.Errorf("%s already exists (np put -f replaces it; binary files keep no history)", name)
+	}
+	if err := n.Store.Put(name, src, n.Self.Name); err != nil {
+		return err
+	}
+	m := n.Store.Get(name)
+	kind := "text, versioned"
+	if m.Blob {
+		kind = "binary, no history"
+	}
+	fmt.Printf("%s (%s; %s)\n", name, store.FileSize(m.Size), kind)
 	return nil
 }
 
 func cmdGet(ctx context.Context, n *proto.Node, args []string) error {
-	name, out := "", ""
+	arg, out := "", ""
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "-o" && i+1 < len(args):
 			out = args[i+1]
 			i++
-		case name == "":
-			name = args[i]
+		case arg == "":
+			arg = args[i]
 		default:
 			return errors.New("expected <name> [-o <path>]")
 		}
 	}
-	if name == "" {
+	if arg == "" {
 		return errors.New("expected <name> [-o <path>]")
 	}
-	n.Store.Scan()
-	m := n.Store.File(name)
-	if m == nil || m.Deleted {
-		return fmt.Errorf("no file %q", name)
+	m, err := find(n, arg, false)
+	if err != nil {
+		return err
 	}
+	name := m.Name
 	if !m.Have {
 		from, err := n.FetchFile(ctx, name)
 		if err != nil {
@@ -760,9 +721,7 @@ func cmdGet(ctx context.Context, n *proto.Node, args []string) error {
 		fmt.Printf("fetched %s (%s) from %s\n", name, store.FileSize(m.Size), from.Name)
 	}
 	if out == "" {
-		if m.Have {
-			fmt.Println(filepath.Join(n.Store.Dir, "files", filepath.FromSlash(name)))
-		}
+		fmt.Println(n.Store.LocalPath(name))
 		return nil
 	}
 	if st, err := os.Stat(out); err == nil && st.IsDir() {
@@ -785,31 +744,29 @@ func cmdGet(ctx context.Context, n *proto.Node, args []string) error {
 }
 
 func cmdDrop(n *proto.Node, args []string) error {
-	name, err := oneArg(args, "<file>")
+	arg, err := oneArg(args, "<name>")
 	if err != nil {
 		return err
 	}
-	n.Store.Scan()
-	m := n.Store.File(name)
-	if m == nil || m.Deleted {
-		return fmt.Errorf("no file %q", name)
+	m, err := find(n, arg, false)
+	if err != nil {
+		return err
 	}
 	if !m.Have {
-		fmt.Println(name, "is not on this machine")
+		fmt.Println(m.Name, "is not on this machine")
 		return nil
 	}
-	return n.Store.DropFile(name)
+	return n.Store.Drop(m.Name)
 }
 
 func cmdLog(n *proto.Node, args []string) error {
-	name, err := oneArg(args, "<name>")
+	arg, err := oneArg(args, "<name>")
 	if err != nil {
 		return err
 	}
-	n.Store.Scan()
-	m := n.Store.Get(name)
-	if m == nil {
-		return fmt.Errorf("no note %q", name)
+	m, err := find(n, arg, true)
+	if err != nil {
+		return err
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	for i := len(m.History) - 1; i >= 0; i-- {
@@ -817,6 +774,9 @@ func cmdLog(n *proto.Node, args []string) error {
 		what := v.Hash
 		if len(what) > 8 {
 			what = what[:8]
+		}
+		if v.Blob {
+			what += "  " + store.FileSize(v.Size) + ", content not kept"
 		}
 		switch {
 		case v.RenamedTo != "":
@@ -835,37 +795,33 @@ func cmdShow(n *proto.Node, args []string) error {
 	if len(args) != 2 {
 		return errors.New("expected <name> <seq>")
 	}
-	name := store.Canon(args[0])
-	m := n.Store.Get(name)
-	if m == nil {
-		return fmt.Errorf("no note %q", name)
+	m, err := find(n, args[0], true)
+	if err != nil {
+		return err
 	}
 	seq, err := strconv.Atoi(args[1])
 	if err != nil || seq < 1 || seq > len(m.History) {
 		return fmt.Errorf("seq must be 1..%d", len(m.History))
 	}
-	v := m.History[seq-1]
-	if v.Deleted {
-		return errors.New("that version is a deletion")
-	}
-	data, err := n.Store.Snapshot(name, v.Hash)
+	data, _, err := versionContent(n, m, seq)
 	if err != nil {
 		return err
+	}
+	if m.History[seq-1].Deleted {
+		return errors.New("that version is a deletion")
 	}
 	_, err = os.Stdout.Write(data)
 	return err
 }
 
-// cmdDiff prints what changed between two versions of a note.
+// cmdDiff prints what changed between two versions of a text file.
 func cmdDiff(n *proto.Node, args []string) error {
 	if len(args) < 1 || len(args) > 3 {
 		return errors.New("expected <name> [seq | a b]")
 	}
-	name := store.Canon(args[0])
-	n.Store.Scan()
-	m := n.Store.Get(name)
-	if m == nil {
-		return fmt.Errorf("no note %q", name)
+	m, err := find(n, args[0], true)
+	if err != nil {
+		return err
 	}
 	last := len(m.History)
 	parse := func(s string) (int, error) {
@@ -876,7 +832,6 @@ func cmdDiff(n *proto.Node, args []string) error {
 		return v, nil
 	}
 	var from, to int
-	var err error
 	switch len(args) {
 	case 1:
 		from, to = last-1, last
@@ -893,11 +848,11 @@ func cmdDiff(n *proto.Node, args []string) error {
 			return err
 		}
 	}
-	a, labelA, err := versionContent(n, name, m, from)
+	a, labelA, err := versionContent(n, m, from)
 	if err != nil {
 		return err
 	}
-	b, labelB, err := versionContent(n, name, m, to)
+	b, labelB, err := versionContent(n, m, to)
 	if err != nil {
 		return err
 	}
@@ -914,17 +869,20 @@ func cmdDiff(n *proto.Node, args []string) error {
 }
 
 // versionContent returns a version's snapshot (empty for seq 0 or a
-// deletion) and a label for the diff header.
-func versionContent(n *proto.Node, name string, m *store.Meta, seq int) ([]byte, string, error) {
+// deletion) and a label for the diff header. Blob versions have no content.
+func versionContent(n *proto.Node, m *store.Meta, seq int) ([]byte, string, error) {
 	if seq < 1 {
-		return nil, name + " (nothing)", nil
+		return nil, m.Name + " (nothing)", nil
 	}
 	v := m.History[seq-1]
-	label := fmt.Sprintf("%s v%d (%s, %s)", name, seq, v.ModBy, v.ModTime.Local().Format("2006-01-02 15:04"))
+	label := fmt.Sprintf("%s v%d (%s, %s)", m.Name, seq, v.ModBy, v.ModTime.Local().Format("2006-01-02 15:04"))
 	if v.Deleted {
 		return nil, label + " deleted", nil
 	}
-	data, err := n.Store.Snapshot(name, v.Hash)
+	if v.Blob {
+		return nil, label, fmt.Errorf("v%d of %s kept no content (binary or large files have no history)", seq, m.Name)
+	}
+	data, err := n.Store.Snapshot(m.Name, v.Hash)
 	return data, label, err
 }
 
@@ -980,7 +938,10 @@ func cmdPeers(ctx context.Context, n *proto.Node) error {
 				rows[i].np = "-"
 			default:
 				if pg, err := n.PingPeer(ctx, p); err == nil {
-					rows[i].np = fmt.Sprintf("np %d notes", pg.Notes)
+					rows[i].np = fmt.Sprintf("np %d files", pg.Notes)
+					if pg.Version != proto.Version {
+						rows[i].np += " (other sync protocol: upgrade)"
+					}
 				} else {
 					rows[i].np = "no np"
 				}
@@ -1095,7 +1056,7 @@ func printReport(rep proto.SyncReport) {
 		fmt.Println("  == merged:", s, "(both edits combined)")
 	}
 	for _, s := range rep.Conflicts {
-		fmt.Println("  !! conflict:", s, "(loser kept as *.conflict-* note)")
+		fmt.Println("  !! conflict:", s, "(loser kept as a *.conflict-* file)")
 	}
 	for _, s := range rep.Errors {
 		fmt.Println("  error:", s)
@@ -1127,6 +1088,17 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 			n.Log.Println("local change:", c)
 		}
 	}
+	// repeat suppresses a message that was already logged for the same
+	// subject, so a peer that keeps failing the same way (one that still
+	// runs an older np, say) is reported once, not every tick.
+	last := map[string]string{}
+	repeat := func(subject, msg string) bool {
+		if last[subject] == msg {
+			return true
+		}
+		last[subject] = msg
+		return false
+	}
 	hubDown := false
 	syncHub := func() bool {
 		p, err := targetPeer(ctx, n, nil)
@@ -1146,11 +1118,16 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 		}
 		rep, err := n.Sync(ctx, p)
 		if err != nil {
-			n.Log.Println("sync:", err)
+			if !repeat("hub", err.Error()) {
+				n.Log.Println("sync:", err)
+			}
 			return true
 		}
-		if len(rep.Pulled)+len(rep.Pushed)+len(rep.Errors) > 0 {
+		if len(rep.Pulled)+len(rep.Pushed) > 0 || (len(rep.Errors) > 0 && !repeat("hub", rep.Detail())) {
 			n.Log.Println("sync", rep.Detail())
+		}
+		if len(rep.Errors) == 0 {
+			delete(last, "hub")
 		}
 		return true
 	}
@@ -1166,7 +1143,11 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 			n.Log.Println(label + ": no other online np peers")
 		}
 		for _, rep := range reps {
-			if verbose || len(rep.Pulled)+len(rep.Pushed)+len(rep.Errors) > 0 {
+			moved := len(rep.Pulled)+len(rep.Pushed) > 0
+			if len(rep.Errors) == 0 {
+				delete(last, rep.Peer)
+			}
+			if moved || (len(rep.Errors) > 0 && !repeat(rep.Peer, rep.Detail())) || (verbose && len(rep.Errors) == 0) {
 				n.Log.Println(label, rep.Detail())
 			}
 		}
@@ -1254,17 +1235,20 @@ func cmdStatus(ctx context.Context, n *proto.Node) error {
 	if hub == "" {
 		hub = "(none)"
 	}
-	files := n.Store.Files(false)
-	stubs := 0
+	files := n.Store.List(false)
+	stubs, blobs := 0, 0
 	for _, m := range files {
 		if !m.Have {
 			stubs++
 		}
+		if m.Blob {
+			blobs++
+		}
 	}
-	fmt.Printf("node:   %s (%s)\nlogin:  %s\ndir:    %s\nhub:    %s\nweb:    http://%s:%d/\nnotes:  %d\nfiles:  %d (%d not fetched; auto-fetch up to %s%s)\n",
-		n.Self.Name, n.Self.IP, n.Self.Login, n.Store.Dir, hub, n.Self.IP, n.Store.Config.Port, len(n.Store.List(false)),
-		len(files), stubs, autoFetchText(n.Store.Config), keepAllText(n.Store.Config))
-	states, _, reason := hubStates(ctx, n)
+	fmt.Printf("node:   %s (%s)\nlogin:  %s\ndir:    %s\nhub:    %s\nweb:    http://%s:%d/\nfiles:  %d (%d with history, %d without; %d not fetched; auto-fetch up to %s%s)\n",
+		n.Self.Name, n.Self.IP, n.Self.Login, n.Store.Dir, hub, n.Self.IP, n.Store.Config.Port,
+		len(files), len(files)-blobs, blobs, stubs, autoFetchText(n.Store.Config), keepAllText(n.Store.Config))
+	states, reason := hubStates(ctx, n)
 	if states == nil {
 		fmt.Printf("sync:   %s\n", reason)
 		return nil

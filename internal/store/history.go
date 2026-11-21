@@ -2,6 +2,7 @@ package store
 
 // History sync support: every node keeps a ledger of the versions it has
 // seen; sync unions the ledgers so all nodes end up with every version.
+// Blob versions are rows without a snapshot.
 // See .docs/design-history-sync.md for the reasoning.
 
 import (
@@ -13,7 +14,7 @@ import (
 	"strings"
 )
 
-// HistoryDigest summarises a note's ledger: equal digests mean identical
+// HistoryDigest summarises a file's ledger: equal digests mean identical
 // sets of versions, so peers can skip the exchange.
 func HistoryDigest(m *Meta) string {
 	keys := make([]string, 0, len(m.History))
@@ -42,15 +43,14 @@ func (s *Store) PutSnapshot(name, hash string, data []byte) error {
 	return s.writeSnapshot(name, hash, data)
 }
 
-// AddVersions unions vs into a note's ledger. Versions already present (by
-// clock) are ignored, as are non-deleted versions whose snapshot is
-// missing, so a caller pulls the content first. The ledger is re-sorted by
-// time and renumbered; the current version stays last. Returns how many
-// were added.
+// AddVersions unions vs into a file's ledger. Versions already present (by
+// clock) are ignored, as are text versions whose snapshot is missing, so a
+// caller pulls the content first. The ledger is re-sorted by time and
+// renumbered; the current version stays last. Returns how many were added.
 func (s *Store) AddVersions(name string, vs []Version) (int, error) {
-	m := s.idx.Notes[name]
+	m := s.idx.Entries[name]
 	if m == nil {
-		return 0, fmt.Errorf("no note %q", name)
+		return 0, fmt.Errorf("no file %q", name)
 	}
 	have := map[string]bool{}
 	for _, v := range m.History {
@@ -62,7 +62,7 @@ func (s *Store) AddVersions(name string, vs []Version) (int, error) {
 		if have[key] || key == "" {
 			continue
 		}
-		if !v.Deleted && !s.HasSnapshot(name, v.Hash) {
+		if !v.Deleted && !v.Blob && !s.HasSnapshot(name, v.Hash) {
 			continue
 		}
 		v.Clock = v.Clock.Copy()
@@ -74,6 +74,13 @@ func (s *Store) AddVersions(name string, vs []Version) (int, error) {
 	if added == 0 {
 		return 0, nil
 	}
+	sortLedger(m)
+	return added, s.saveIndex()
+}
+
+// sortLedger orders a ledger by time and renumbers it; the row that
+// carries the entry's current clock stays last whatever its timestamp.
+func sortLedger(m *Meta) {
 	cur := m.Clock.String()
 	sort.SliceStable(m.History, func(i, j int) bool {
 		a, b := m.History[i], m.History[j]
@@ -88,13 +95,12 @@ func (s *Store) AddVersions(name string, vs []Version) (int, error) {
 	for i := range m.History {
 		m.History[i].Seq = i + 1
 	}
-	return added, s.saveIndex()
 }
 
 // MissingVersions returns the entries of remote that the local ledger of
 // name lacks, and the local entries remote lacks.
 func (s *Store) MissingVersions(name string, remote []Version) (here, there []Version) {
-	m := s.idx.Notes[name]
+	m := s.idx.Entries[name]
 	local := map[string]bool{}
 	if m != nil {
 		for _, v := range m.History {

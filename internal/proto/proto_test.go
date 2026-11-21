@@ -3,6 +3,7 @@ package proto
 import (
 	"context"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strconv"
@@ -46,7 +47,7 @@ func TestSyncRoundTrip(t *testing.T) {
 	a.Store.Config.Port = hub.Store.Config.Port
 	b.Store.Config.Port = hub.Store.Config.Port
 
-	a.Store.Write("shared", []byte("hello from a"))
+	a.Store.Write("shared.md", []byte("hello from a"))
 	rep, err := a.Sync(ctx, hubPeer)
 	if err != nil || len(rep.Pushed) != 1 {
 		t.Fatalf("rep=%+v err=%v", rep, err)
@@ -55,39 +56,39 @@ func TestSyncRoundTrip(t *testing.T) {
 	if err != nil || len(rep.Pulled) != 1 {
 		t.Fatalf("rep=%+v err=%v", rep, err)
 	}
-	got, _ := b.Store.Read("shared")
+	got, _ := b.Store.Read("shared.md")
 	if string(got) != "hello from a" {
 		t.Fatal(string(got))
 	}
 
 	// Sequential edit on b flows back to a through the hub.
-	b.Store.Write("shared", []byte("edited on b"))
+	b.Store.Write("shared.md", []byte("edited on b"))
 	if rep, _ = b.Sync(ctx, hubPeer); len(rep.Pushed) != 1 {
 		t.Fatalf("%+v", rep)
 	}
 	if rep, _ = a.Sync(ctx, hubPeer); len(rep.Pulled) != 1 || len(rep.Conflicts) != 0 {
 		t.Fatalf("%+v", rep)
 	}
-	got, _ = a.Store.Read("shared")
+	got, _ = a.Store.Read("shared.md")
 	if string(got) != "edited on b" {
 		t.Fatal(string(got))
 	}
 
 	// Concurrent edits: a and b both change without syncing in between.
-	a.Store.Write("shared", []byte("a wins?"))
+	a.Store.Write("shared.md", []byte("a wins?"))
 	time.Sleep(20 * time.Millisecond)
-	b.Store.Write("shared", []byte("b is newer"))
+	b.Store.Write("shared.md", []byte("b is newer"))
 	a.Sync(ctx, hubPeer) // a pushes first
 	rep, _ = b.Sync(ctx, hubPeer)
 	if len(rep.Conflicts) != 1 {
 		t.Fatalf("expected conflict on b: %+v", rep)
 	}
 	rep, _ = a.Sync(ctx, hubPeer)
-	if len(rep.Pulled) < 2 { // merged "shared" + the conflict copy
+	if len(rep.Pulled) < 2 { // merged "shared.md" + the conflict copy
 		t.Fatalf("a should pull merge result and conflict note: %+v", rep)
 	}
 	for _, n := range []*Node{hub, a, b} {
-		got, _ := n.Store.Read("shared")
+		got, _ := n.Store.Read("shared.md")
 		if string(got) != "b is newer" {
 			t.Fatalf("%s has %q", n.Self.Name, got)
 		}
@@ -97,10 +98,10 @@ func TestSyncRoundTrip(t *testing.T) {
 	}
 
 	// Delete propagates.
-	a.Store.Delete("shared")
+	a.Store.Delete("shared.md")
 	a.Sync(ctx, hubPeer)
 	b.Sync(ctx, hubPeer)
-	if _, err := b.Store.Read("shared"); err == nil {
+	if _, err := b.Store.Read("shared.md"); err == nil {
 		t.Fatal("delete did not propagate")
 	}
 	// Idempotent.
@@ -162,12 +163,12 @@ func TestSyncMergesDisjointEditsThroughHub(t *testing.T) {
 	a.Store.Config.Port = hub.Store.Config.Port
 	b.Store.Config.Port = hub.Store.Config.Port
 
-	a.Store.Write("list", []byte("- milk\n- eggs\n"))
+	a.Store.Write("list.md", []byte("- milk\n- eggs\n"))
 	a.Sync(ctx, hubPeer)
 	b.Sync(ctx, hubPeer)
 
-	a.Store.Write("list", []byte("- oat milk\n- eggs\n"))
-	b.Store.Write("list", []byte("- milk\n- eggs\n- bread\n"))
+	a.Store.Write("list.md", []byte("- oat milk\n- eggs\n"))
+	b.Store.Write("list.md", []byte("- milk\n- eggs\n- bread\n"))
 	a.Sync(ctx, hubPeer)
 	// b pulls a's version, merges it locally, and pushes the result in the
 	// same run.
@@ -183,12 +184,12 @@ func TestSyncMergesDisjointEditsThroughHub(t *testing.T) {
 		t.Fatalf("a: %+v", rep)
 	}
 	for _, n := range []*Node{hub, a, b} {
-		got, _ := n.Store.Read("list")
+		got, _ := n.Store.Read("list.md")
 		if string(got) != "- oat milk\n- eggs\n- bread\n" {
 			t.Fatalf("%s has %q", n.Self.Name, got)
 		}
 		if len(n.Store.List(false)) != 1 {
-			t.Fatalf("%s has %d notes", n.Self.Name, len(n.Store.List(false)))
+			t.Fatalf("%s has %d files", n.Self.Name, len(n.Store.List(false)))
 		}
 	}
 }
@@ -215,30 +216,35 @@ func TestSyncFilesLazy(t *testing.T) {
 	b.Store.Config.Port = hub.Store.Config.Port
 	a.Store.Config.AutoFetch = 16
 	b.Store.Config.AutoFetch = 16
+	a.Store.Write("readme.md", []byte(strings.Repeat("text is never lazy\n", 10)))
 
-	small := "tiny"
-	big := strings.Repeat("x", 100)
-	a.Store.PutFile("icon.png", strings.NewReader(small), "a")
-	a.Store.PutFile("movie.mp4", strings.NewReader(big), "a")
+	small := "\x00tiny"
+	big := "\x00" + strings.Repeat("x", 100)
+	a.Store.Put("icon.png", strings.NewReader(small), "a")
+	a.Store.Put("movie.mp4", strings.NewReader(big), "a")
 
 	// a pushes both with content; the hub keeps everything.
 	rep, err := a.Sync(ctx, hubPeer)
-	if err != nil || len(rep.Pushed) != 2 || len(rep.Errors) != 0 {
+	if err != nil || len(rep.Pushed) != 3 || len(rep.Errors) != 0 {
 		t.Fatalf("rep=%+v err=%v", rep, err)
 	}
 	if readFile(t, hub, "movie.mp4") != big || readFile(t, hub, "icon.png") != small {
 		t.Fatal("hub content")
 	}
 
-	// b pulls the small file with content and the big one as a stub.
+	// b pulls the small file and the text with content and the big blob
+	// as a stub: text is fetched whatever the auto-fetch limit says.
 	rep, _ = b.Sync(ctx, hubPeer)
-	if len(rep.Pulled) != 2 || len(rep.NotFetched) != 1 || rep.NotFetched[0] != "files/movie.mp4" {
+	if len(rep.Pulled) != 3 || len(rep.NotFetched) != 1 || rep.NotFetched[0] != "movie.mp4" {
 		t.Fatalf("b: %+v", rep)
+	}
+	if m := b.Store.Get("readme.md"); m == nil || !m.Have || m.Blob || m.Size <= 16 {
+		t.Fatalf("readme=%+v", m)
 	}
 	if readFile(t, b, "icon.png") != small {
 		t.Fatal("small file should have content")
 	}
-	if m := b.Store.File("movie.mp4"); m == nil || m.Have || m.Size != 100 {
+	if m := b.Store.Get("movie.mp4"); m == nil || m.Have || !m.Blob || m.Size != 101 {
 		t.Fatalf("stub=%+v", m)
 	}
 	// Idempotent: nothing moves on the next run, the stub is not re-pulled.
@@ -255,7 +261,7 @@ func TestSyncFilesLazy(t *testing.T) {
 	}
 
 	// A new version of a file b holds is pulled with content even if big.
-	a.Store.PutFile("movie.mp4", strings.NewReader(big+"2"), "a")
+	a.Store.Put("movie.mp4", strings.NewReader(big+"2"), "a")
 	a.Sync(ctx, hubPeer)
 	rep, _ = b.Sync(ctx, hubPeer)
 	if len(rep.Pulled) != 1 || len(rep.NotFetched) != 0 {
@@ -266,7 +272,7 @@ func TestSyncFilesLazy(t *testing.T) {
 	}
 
 	// Delete propagates and removes content everywhere.
-	if err := b.Store.DeleteFile("movie.mp4", "b"); err != nil {
+	if err := b.Store.DeleteBy("movie.mp4", "b"); err != nil {
 		t.Fatal(err)
 	}
 	b.Sync(ctx, hubPeer)
@@ -276,8 +282,8 @@ func TestSyncFilesLazy(t *testing.T) {
 			t.Fatalf("%s still has movie.mp4", n.Self.Name)
 		}
 	}
-	if len(a.Store.Files(false)) != 1 {
-		t.Fatal("a should have one file left")
+	if len(a.Store.List(false)) != 2 {
+		t.Fatal("a should have two files left")
 	}
 }
 
@@ -292,26 +298,26 @@ func TestSyncFilesStubDoesNotDowngradeHolder(t *testing.T) {
 	// node that only knows about a newer version must not wipe the hub.
 	a.Store.Config.AutoFetch = 4
 	hub.Store.Config.AutoFetch = 4
-	a.Store.PutFile("f.bin", strings.NewReader("0123456789"), "a")
+	a.Store.Put("f.bin", strings.NewReader("\x000123456789"), "a")
 	a.Sync(ctx, hubPeer)
-	if readFile(t, hub, "f.bin") != "0123456789" {
+	if readFile(t, hub, "f.bin") != "\x000123456789" {
 		t.Fatal("hub should hold the pushed content")
 	}
 	c := newNode(t, "c", "emre@example.com")
 	c.Store.Config.Port = hub.Store.Config.Port
 	c.Store.Config.AutoFetch = 4
 	c.Sync(ctx, hubPeer) // c gets a stub
-	if m := c.Store.File("f.bin"); m == nil || m.Have {
+	if m := c.Store.Get("f.bin"); m == nil || m.Have {
 		t.Fatalf("c=%+v", m)
 	}
 	// c drops nothing but forges a newer stub-only version? Not possible in
 	// practice: c can only bump what it edits, and editing needs content.
 	// Instead: hub drops its copy; a still has content and refills the hub.
-	if err := hub.Store.DropFile("f.bin"); err != nil {
+	if err := hub.Store.Drop("f.bin"); err != nil {
 		t.Fatal(err)
 	}
 	rep, _ := a.Sync(ctx, hubPeer)
-	if len(rep.Pushed) != 0 { // 10 bytes > hub's 4-byte auto limit: not refilled unasked
+	if len(rep.Pushed) != 0 { // 11 bytes > hub's 4-byte auto limit: not refilled unasked
 		t.Fatalf("a: %+v", rep)
 	}
 	hub.Store.Config.KeepAll = true
@@ -320,7 +326,7 @@ func TestSyncFilesStubDoesNotDowngradeHolder(t *testing.T) {
 	aPeer := serve(t, a, "emre@example.com")
 	hub.Store.Config.Port = a.Store.Config.Port
 	rep, _ = hub.Sync(ctx, aPeer)
-	if len(rep.Pulled) != 1 || readFile(t, hub, "f.bin") != "0123456789" {
+	if len(rep.Pulled) != 1 || readFile(t, hub, "f.bin") != "\x000123456789" {
 		t.Fatalf("hub refill: %+v", rep)
 	}
 }
@@ -336,44 +342,44 @@ func TestSyncHistoryUnion(t *testing.T) {
 
 	// a makes three versions before ever syncing.
 	for _, v := range []string{"v1", "v2", "v3"} {
-		a.Store.Write("n", []byte(v))
+		a.Store.Write("n.md", []byte(v))
 		time.Sleep(2 * time.Millisecond)
 	}
 	rep, err := a.Sync(ctx, hubPeer)
 	if err != nil || len(rep.Pushed) != 1 || rep.VersionsPushed != 2 {
 		t.Fatalf("a: %+v %v", rep, err)
 	}
-	if len(hub.Store.Get("n").History) != 3 {
-		t.Fatalf("hub history=%d", len(hub.Store.Get("n").History))
+	if len(hub.Store.Get("n.md").History) != 3 {
+		t.Fatalf("hub history=%d", len(hub.Store.Get("n.md").History))
 	}
 	// b pulls the note and the whole ledger.
 	rep, _ = b.Sync(ctx, hubPeer)
 	if len(rep.Pulled) != 1 || rep.Versions != 2 {
 		t.Fatalf("b: %+v", rep)
 	}
-	hb := b.Store.Get("n").History
-	if len(hb) != 3 || hb[2].Hash != b.Store.Get("n").Hash {
+	hb := b.Store.Get("n.md").History
+	if len(hb) != 3 || hb[2].Hash != b.Store.Get("n.md").Hash {
 		t.Fatalf("b history=%+v", hb)
 	}
-	if got, _ := b.Store.Snapshot("n", hb[0].Hash); string(got) != "v1" {
+	if got, _ := b.Store.Snapshot("n.md", hb[0].Hash); string(got) != "v1" {
 		t.Fatalf("b oldest=%q", got)
 	}
 	// b edits twice; a ends up with all five.
-	b.Store.Write("n", []byte("v4"))
+	b.Store.Write("n.md", []byte("v4"))
 	time.Sleep(2 * time.Millisecond)
-	b.Store.Write("n", []byte("v5"))
+	b.Store.Write("n.md", []byte("v5"))
 	b.Sync(ctx, hubPeer)
 	rep, _ = a.Sync(ctx, hubPeer)
 	if len(rep.Pulled) != 1 || rep.Versions != 1 {
 		t.Fatalf("a second: %+v", rep)
 	}
 	for _, n := range []*Node{hub, a, b} {
-		h := n.Store.Get("n").History
-		if len(h) != 5 || h[4].Hash != n.Store.Get("n").Hash {
+		h := n.Store.Get("n.md").History
+		if len(h) != 5 || h[4].Hash != n.Store.Get("n.md").Hash {
 			t.Fatalf("%s history=%d", n.Self.Name, len(h))
 		}
 		for i, want := range []string{"v1", "v2", "v3", "v4", "v5"} {
-			if got, _ := n.Store.Snapshot("n", h[i].Hash); string(got) != want {
+			if got, _ := n.Store.Snapshot("n.md", h[i].Hash); string(got) != want {
 				t.Fatalf("%s v%d=%q", n.Self.Name, i+1, got)
 			}
 		}
@@ -383,10 +389,10 @@ func TestSyncHistoryUnion(t *testing.T) {
 		t.Fatalf("not idempotent: %+v", rep)
 	}
 	// Deletion history travels too.
-	b.Store.Delete("n")
+	b.Store.Delete("n.md")
 	b.Sync(ctx, hubPeer)
 	a.Sync(ctx, hubPeer)
-	if h := a.Store.Get("n").History; len(h) != 6 || !h[5].Deleted {
+	if h := a.Store.Get("n.md").History; len(h) != 6 || !h[5].Deleted {
 		t.Fatalf("a after delete: %+v", h)
 	}
 }
@@ -400,29 +406,116 @@ func TestRenameThroughHubKeepsHistoryEverywhere(t *testing.T) {
 	a.Store.Config.Port = hub.Store.Config.Port
 	b.Store.Config.Port = hub.Store.Config.Port
 
-	a.Store.Write("draft", []byte("one"))
+	a.Store.Write("draft.md", []byte("one"))
 	time.Sleep(2 * time.Millisecond)
-	a.Store.Write("draft", []byte("two"))
+	a.Store.Write("draft.md", []byte("two"))
 	a.Sync(ctx, hubPeer)
 	b.Sync(ctx, hubPeer)
-	if err := a.Store.Rename("draft", "final", ""); err != nil {
+	if err := a.Store.Rename("draft.md", "final.md", ""); err != nil {
 		t.Fatal(err)
 	}
 	a.Sync(ctx, hubPeer)
 	b.Sync(ctx, hubPeer)
 	for _, n := range []*Node{hub, a, b} {
-		m := n.Store.Get("final")
-		if m == nil || len(m.History) != 3 || m.History[2].RenamedFrom != "draft" {
+		m := n.Store.Get("final.md")
+		if m == nil || len(m.History) != 3 || m.History[2].RenamedFrom != "draft.md" {
 			t.Fatalf("%s final=%+v", n.Self.Name, m)
 		}
-		if got, _ := n.Store.Snapshot("final", m.History[0].Hash); string(got) != "one" {
+		if got, _ := n.Store.Snapshot("final.md", m.History[0].Hash); string(got) != "one" {
 			t.Fatalf("%s lost the first version", n.Self.Name)
 		}
-		if o := n.Store.Get("draft"); !o.Deleted || o.RenamedTo != "final" {
+		if got, err := n.Store.Read("final.md"); err != nil || string(got) != "two" {
+			t.Fatalf("%s content=%q err=%v", n.Self.Name, got, err)
+		}
+		if o := n.Store.Get("draft.md"); !o.Deleted || o.RenamedTo != "final.md" {
 			t.Fatalf("%s draft=%+v", n.Self.Name, o)
 		}
 		if len(n.Store.List(false)) != 1 {
-			t.Fatalf("%s has %d notes", n.Self.Name, len(n.Store.List(false)))
+			t.Fatalf("%s has %d files", n.Self.Name, len(n.Store.List(false)))
 		}
+	}
+}
+
+func TestSyncRefusesOtherProtocol(t *testing.T) {
+	// A peer that answers the ping but has no v2 routes (an older np).
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /np/v1/ping", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, Ping{Node: "old", Version: "1"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	ap := netip.MustParseAddrPort(srv.Listener.Addr().String())
+	a := newNode(t, "a", "emre@example.com")
+	a.Store.Config.Port = int(ap.Port())
+	a.Store.Write("n.md", []byte("x"))
+	old := ts.Peer{Name: "old", IP: ap.Addr(), Online: true}
+	if pg, err := a.PingPeer(context.Background(), old); err != nil || pg.Version != "1" {
+		t.Fatalf("ping=%+v err=%v", pg, err)
+	}
+	_, err := a.Sync(context.Background(), old)
+	if err == nil || !strings.Contains(err.Error(), "np upgrade") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSyncUnusualNames(t *testing.T) {
+	ctx := context.Background()
+	hub := newNode(t, "hub", "emre@example.com")
+	hubPeer := serve(t, hub, "emre@example.com")
+	a := newNode(t, "a", "emre@example.com")
+	b := newNode(t, "b", "emre@example.com")
+	a.Store.Config.Port = hub.Store.Config.Port
+	b.Store.Config.Port = hub.Store.Config.Port
+	names := []string{"trip photos/İstanbul #1?.md", "100% done & more.md", "a+b=c.json"}
+	for _, name := range names {
+		if err := a.Store.Write(name, []byte("v1 of "+name)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond)
+		a.Store.Write(name, []byte("v2 of "+name))
+	}
+	if rep, err := a.Sync(ctx, hubPeer); err != nil || len(rep.Errors) != 0 || len(rep.Pushed) != len(names) {
+		t.Fatalf("a: %+v %v", rep, err)
+	}
+	rep, err := b.Sync(ctx, hubPeer)
+	if err != nil || len(rep.Errors) != 0 || len(rep.Pulled) != len(names) || rep.Versions != len(names) {
+		t.Fatalf("b: %+v %v", rep, err)
+	}
+	for _, name := range names {
+		if got, _ := b.Store.Read(name); string(got) != "v2 of "+name {
+			t.Fatalf("%s: %q", name, got)
+		}
+	}
+}
+
+func TestBlobRenameThroughHubNeedsNoDownload(t *testing.T) {
+	ctx := context.Background()
+	hub := newNode(t, "hub", "emre@example.com")
+	hub.Store.Config.KeepAll = true
+	hubPeer := serve(t, hub, "emre@example.com")
+	a := newNode(t, "a", "emre@example.com")
+	b := newNode(t, "b", "emre@example.com")
+	a.Store.Config.Port = hub.Store.Config.Port
+	b.Store.Config.Port = hub.Store.Config.Port
+	a.Store.Put("clip.mov", strings.NewReader("\x00movie"), "a")
+	a.Sync(ctx, hubPeer)
+	b.Sync(ctx, hubPeer)
+	if err := a.Store.Rename("clip.mov", "trips/clip.mov", ""); err != nil {
+		t.Fatal(err)
+	}
+	a.Sync(ctx, hubPeer)
+	// b must not need the network for the bytes: with auto-fetch off the
+	// renamed blob is still held, copied from the old name before its
+	// tombstone is applied.
+	b.Store.Config.AutoFetch = -1
+	rep, err := b.Sync(ctx, hubPeer)
+	if err != nil || len(rep.Errors) != 0 || len(rep.NotFetched) != 0 {
+		t.Fatalf("b: %+v %v", rep, err)
+	}
+	if readFile(t, b, "trips/clip.mov") != "\x00movie" {
+		t.Fatal("b should hold the renamed blob")
+	}
+	if m := b.Store.Get("clip.mov"); !m.Deleted {
+		t.Fatalf("old name=%+v", m)
 	}
 }

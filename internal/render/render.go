@@ -1,4 +1,4 @@
-// Package render turns note content into something readable: markdown to
+// Package render turns text content into something readable: markdown to
 // styled HTML or terminal output, other file types to highlighted code.
 package render
 
@@ -22,25 +22,25 @@ import (
 )
 
 // md renders GitHub-flavoured markdown. Raw HTML in notes is escaped, not
-// rendered, so a note cannot inject script into the page.
+// rendered, so a file cannot inject script into the page.
 var md = goldmark.New(
 	goldmark.WithExtensions(extension.GFM, extension.Typographer),
 	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
 )
 
 func lexerFor(name string) chroma.Lexer {
-	l := lexers.Match(store.FileName(name))
+	l := lexers.Match(name)
 	if l == nil {
 		l = lexers.Fallback
 	}
 	return chroma.Coalesce(l)
 }
 
-// HTML renders a note for the web UI. Markdown notes become a document;
+// HTML renders a text file for the web UI. Markdown becomes a document;
 // anything else becomes a highlighted code block using chroma CSS classes
 // (see CSS).
 func HTML(name string, src []byte) template.HTML {
-	if store.Ext(name) == "" {
+	if store.IsMarkdown(name) {
 		var buf bytes.Buffer
 		if err := md.Convert(src, &buf); err == nil {
 			return template.HTML(buf.String())
@@ -68,10 +68,10 @@ func CSS() string {
 	return light.String() + "\n@media(prefers-color-scheme:dark){" + strings.ReplaceAll(dark.String(), "\n", "\n") + "}"
 }
 
-// Terminal writes a note to w with ANSI styling: glamour for markdown,
+// Terminal writes a text file to w with ANSI styling: glamour for markdown,
 // chroma for code. dark selects the colour scheme.
 func Terminal(w io.Writer, name string, src []byte, width int, dark bool) error {
-	if store.Ext(name) == "" {
+	if store.IsMarkdown(name) {
 		style := glamour.WithStandardStyle("light")
 		if dark {
 			style = glamour.WithStandardStyle("dark")
