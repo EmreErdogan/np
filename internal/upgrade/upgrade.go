@@ -1,4 +1,10 @@
 // Package upgrade replaces the running binary with the latest GitHub release.
+//
+// It talks to github.com the way install.sh does: the latest tag comes from
+// the redirect of /releases/latest and the files from /releases/download.
+// The REST API is not used, because its unauthenticated quota (60 requests
+// an hour per IP address, shared with everything else behind that address)
+// made upgrades fail with a bare "403 Forbidden".
 package upgrade
 
 import (
@@ -7,74 +13,109 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const Repo = "EmreErdogan/np"
 
-// Release is the subset of the GitHub release API we use.
+// Base is where releases are looked up; tests point it at a local server.
+var Base = "https://github.com/" + Repo
+
+// UserAgent identifies np to GitHub ("np/<version>").
+var UserAgent = "np"
+
+// Release is a published version.
 type Release struct {
-	Tag    string `json:"tag_name"`
-	Assets []struct {
-		Name string `json:"name"`
-		URL  string `json:"browser_download_url"`
-	} `json:"assets"`
+	Tag string
 }
 
 var client = &http.Client{Timeout: 2 * time.Minute}
 
-// Latest fetches the newest release.
-func Latest(ctx context.Context) (*Release, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/repos/"+Repo+"/releases/latest", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("github: %s", resp.Status)
-	}
-	var rel Release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return nil, err
-	}
-	return &rel, nil
+// noFollow answers with the redirect itself instead of following it.
+var noFollow = &http.Client{
+	Timeout:       30 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-func (r *Release) asset(name string) string {
-	for _, a := range r.Assets {
-		if a.Name == name {
-			return a.URL
-		}
-	}
-	return ""
-}
-
-func fetch(ctx context.Context, url string) ([]byte, error) {
+func get(ctx context.Context, c *http.Client, url string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.Do(req)
+	req.Header.Set("User-Agent", UserAgent)
+	return c.Do(req)
+}
+
+// statusError explains a refusal, saying when to try again if GitHub told us.
+func statusError(resp *http.Response, what string) error {
+	msg := fmt.Sprintf("github.com answered %s for %s", resp.Status, what)
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
+		when := ""
+		if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs > 0 {
+			when = time.Now().Add(time.Duration(secs) * time.Second).Format("15:04")
+		} else if unix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil && unix > 0 {
+			when = time.Unix(unix, 0).Format("15:04")
+		}
+		msg += ": too many requests from this network"
+		if when != "" {
+			msg += ", try again after " + when
+		} else {
+			msg += ", try again in a few minutes"
+		}
+	}
+	return errors.New(msg)
+}
+
+// Latest finds the newest release from where /releases/latest redirects to.
+func Latest(ctx context.Context) (*Release, error) {
+	resp, err := get(ctx, noFollow, Base+"/releases/latest")
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	if resp.StatusCode/100 != 3 || loc == "" {
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+			return nil, errors.New("no release has been published yet")
+		}
+		return nil, statusError(resp, "the latest release")
+	}
+	i := strings.LastIndex(loc, "/tag/")
+	if i < 0 {
+		return nil, fmt.Errorf("unexpected answer for the latest release: %s", loc)
+	}
+	tag := path.Base(loc[i:])
+	if tag == "" || tag == "tag" || strings.ContainsAny(tag, "?#") {
+		return nil, fmt.Errorf("unexpected answer for the latest release: %s", loc)
+	}
+	return &Release{Tag: tag}, nil
+}
+
+func (r *Release) asset(name string) string {
+	return Base + "/releases/download/" + r.Tag + "/" + name
+}
+
+func fetch(ctx context.Context, url string) ([]byte, error) {
+	resp, err := get(ctx, client, url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%s is not part of the release", path.Base(url))
+	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("%s: %s", url, resp.Status)
+		return nil, statusError(resp, path.Base(url))
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 200<<20))
 }
@@ -84,11 +125,7 @@ func fetch(ctx context.Context, url string) ([]byte, error) {
 func Install(ctx context.Context, rel *Release, exe string) error {
 	ver := strings.TrimPrefix(rel.Tag, "v")
 	name := fmt.Sprintf("np_%s_%s_%s.tar.gz", ver, runtime.GOOS, runtime.GOARCH)
-	archiveURL, sumsURL := rel.asset(name), rel.asset("checksums.txt")
-	if archiveURL == "" || sumsURL == "" {
-		return fmt.Errorf("release %s has no build for %s/%s", rel.Tag, runtime.GOOS, runtime.GOARCH)
-	}
-	sums, err := fetch(ctx, sumsURL)
+	sums, err := fetch(ctx, rel.asset("checksums.txt"))
 	if err != nil {
 		return err
 	}
@@ -99,9 +136,9 @@ func Install(ctx context.Context, rel *Release, exe string) error {
 		}
 	}
 	if want == "" {
-		return fmt.Errorf("checksums.txt has no entry for %s", name)
+		return fmt.Errorf("release %s has no build for %s/%s", rel.Tag, runtime.GOOS, runtime.GOARCH)
 	}
-	archive, err := fetch(ctx, archiveURL)
+	archive, err := fetch(ctx, rel.asset(name))
 	if err != nil {
 		return err
 	}
