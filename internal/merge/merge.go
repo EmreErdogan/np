@@ -99,8 +99,31 @@ func equal(a, b []string) bool {
 
 // match returns, for every line of o, the index of the line it is matched
 // with in x under a longest common subsequence, or -1.
+//
+// Lines the two sides share at the start and at the end are matched
+// directly; only the part in between goes through the quadratic table. An
+// edit in a long file therefore costs what the edited region costs, and
+// appending to a file of any length costs next to nothing.
 func match(o, x []string) []int {
+	res := make([]int, len(o))
+	for i := range res {
+		res[i] = -1
+	}
+	pre := 0
+	for pre < len(o) && pre < len(x) && o[pre] == x[pre] {
+		res[pre] = pre
+		pre++
+	}
+	suf := 0
+	for suf < len(o)-pre && suf < len(x)-pre && o[len(o)-1-suf] == x[len(x)-1-suf] {
+		res[len(o)-1-suf] = len(x) - 1 - suf
+		suf++
+	}
+	o, x = o[pre:len(o)-suf], x[pre:len(x)-suf]
 	n, m := len(o), len(x)
+	if n == 0 || m == 0 {
+		return res
+	}
 	// dp[i][j] = LCS length of o[i:], x[j:].
 	dp := make([][]int32, n+1)
 	for i := range dp {
@@ -117,15 +140,11 @@ func match(o, x []string) []int {
 			}
 		}
 	}
-	res := make([]int, n)
-	for i := range res {
-		res[i] = -1
-	}
 	i, j := 0, 0
 	for i < n && j < m {
 		switch {
 		case o[i] == x[j]:
-			res[i] = j
+			res[pre+i] = pre + j
 			i++
 			j++
 		case dp[i+1][j] >= dp[i][j+1]:

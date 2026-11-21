@@ -1,6 +1,10 @@
 package merge
 
-import "testing"
+import (
+	"strconv"
+	"strings"
+	"testing"
+)
 
 func TestUnified(t *testing.T) {
 	a := "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n"
@@ -53,5 +57,34 @@ func TestDiffEdges(t *testing.T) {
 	}
 	if add, del := Stat([]byte("a\nb\n"), []byte("b\nc\nd\n")); add != 2 || del != 1 {
 		t.Fatal(add, del)
+	}
+}
+
+func TestMatchSkipsSharedEnds(t *testing.T) {
+	// One edited region in a long file (a changed line, or lines appended)
+	// must cost what the region costs, not a table the size of the file.
+	// Two regions far apart still pay for the span between them.
+	var a []string
+	for i := 0; i < 20000; i++ {
+		a = append(a, "line "+strconv.Itoa(i))
+	}
+	text := func(ls []string) []byte { return []byte(strings.Join(ls, "\n") + "\n") }
+	changed := append([]string(nil), a...)
+	changed[10000] = "changed"
+	appended := append(append([]string(nil), a...), "new 1", "new 2")
+	if add, del := Stat(text(a), text(changed)); add != 1 || del != 1 {
+		t.Fatalf("changed: +%d -%d", add, del)
+	}
+	if add, del := Stat(text(a), text(appended)); add != 2 || del != 0 {
+		t.Fatalf("appended: +%d -%d", add, del)
+	}
+	for name, b := range map[string][]string{"changed": changed, "appended": appended} {
+		if allocs := testing.AllocsPerRun(1, func() { match(a, b) }); allocs > 10 {
+			t.Fatalf("%s: match allocated %.0f times", name, allocs)
+		}
+	}
+	// Repeated lines around the edit still align.
+	if got := match([]string{"x", "x", "a", "x"}, []string{"x", "x", "x"}); got[0] != 0 || got[1] != 1 || got[2] != -1 || got[3] != 2 {
+		t.Fatalf("match=%v", got)
 	}
 }
