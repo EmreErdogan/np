@@ -28,6 +28,19 @@ import (
 	"github.com/EmreErdogan/np/internal/clock"
 )
 
+// NeedsMigration reports whether the repository at dir is in an older
+// layout, i.e. whether opening it would migrate it.
+func NeedsMigration(dir string) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, "index.json"))
+	if err != nil {
+		return false
+	}
+	var probe struct {
+		Layout int `json:"layout"`
+	}
+	return json.Unmarshal(raw, &probe) == nil && probe.Layout < Layout
+}
+
 type legacyIndex struct {
 	Notes map[string]*Meta `json:"notes"`
 	Files map[string]*Meta `json:"files"`

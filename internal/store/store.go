@@ -203,6 +203,19 @@ func Open(dir, node string) (*Store, error) {
 	return s, nil
 }
 
+// ReadConfig reads config.json of the repository at dir without opening it.
+func ReadConfig(dir string) (Config, error) {
+	var c Config
+	err := readJSON(filepath.Join(dir, "config.json"), &c)
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	if c.Port == 0 {
+		c.Port = DefaultPort
+	}
+	return c, err
+}
+
 // SaveConfig persists config.json.
 func (s *Store) SaveConfig() error {
 	return writeJSON(filepath.Join(s.Dir, "config.json"), s.Config)

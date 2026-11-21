@@ -3,11 +3,13 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -102,8 +104,12 @@ func Run(args []string) int {
 		fmt.Println("np", Version)
 		return 0
 	}
-	if args[0] == "upgrade" { // works without tailscale
-		if err := cmdUpgrade(args[1:]); err != nil {
+	if args[0] == "upgrade" || args[0] == "service" { // work without tailscale and without opening the store
+		cmd := cmdUpgrade
+		if args[0] == "service" {
+			cmd = cmdService
+		}
+		if err := cmd(args[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "np:", err)
 			return 1
 		}
@@ -167,8 +173,6 @@ func run(cmd string, args []string) error {
 		return cmdDaemon(ctx, n)
 	case "status":
 		return cmdStatus(ctx, n)
-	case "service":
-		return cmdService(n, args)
 	default:
 		return fmt.Errorf("unknown command %q (try `np help`)", cmd)
 	}
@@ -183,6 +187,9 @@ func openNode(ctx context.Context) (*proto.Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := olderDaemon(ctx, dir, self); err != nil {
+		return nil, err
+	}
 	s, err := store.Open(dir, self.Name)
 	if err != nil {
 		return nil, err
@@ -193,6 +200,44 @@ func openNode(ctx context.Context) (*proto.Node, error) {
 	n := &proto.Node{Store: s, Self: self, Log: log.New(os.Stderr, "", log.Ltime)}
 	n.Mount = []func(*http.ServeMux){web.Mount(n)}
 	return n, nil
+}
+
+// olderDaemon refuses to go on when opening the store would upgrade its
+// layout while a daemon from an older np is still serving it on this
+// machine. That happens when the command line was upgraded but the
+// background service runs another copy of the binary: the old daemon would
+// keep working from an index it no longer shares with us.
+func olderDaemon(ctx context.Context, dir string, self ts.Identity) error {
+	if !store.NeedsMigration(dir) || !self.IP.IsValid() {
+		return nil
+	}
+	cfg, err := store.ReadConfig(dir)
+	if err != nil {
+		return nil // Open reports a broken config better than we can here
+	}
+	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	url := fmt.Sprintf("http://%s/np/v1/ping", netip.AddrPortFrom(self.IP, uint16(cfg.Port)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil // nothing is listening: safe to upgrade the store
+	}
+	defer resp.Body.Close()
+	var pg proto.Ping
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&pg) != nil || pg.Version == proto.Version {
+		return nil
+	}
+	msg := "an older np daemon is still running on this machine and would not understand the upgraded store.\n"
+	if bin, ok := service.Binary(); ok {
+		msg += fmt.Sprintf("The background service runs %s. Run `np service install` to point it at this np, then repeat the command.", bin)
+	} else {
+		msg += "Stop it (it was not started by `np service`), then repeat the command."
+	}
+	return errors.New(msg)
 }
 
 func oneArg(args []string, what string) (string, error) {
@@ -1182,21 +1227,44 @@ func cmdDaemon(ctx context.Context, n *proto.Node) error {
 	}
 }
 
-func cmdService(n *proto.Node, args []string) error {
+// thisBinary is the path of the running np with links resolved.
+func thisBinary() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(exe)
+}
+
+// serviceElsewhere returns the binary the installed service runs when it
+// is not the one running now ("" when they match or no service exists).
+func serviceElsewhere(exe string) string {
+	bin, ok := service.Binary()
+	if !ok || bin == "" || service.SameFile(bin, exe) {
+		return ""
+	}
+	return bin
+}
+
+func cmdService(args []string) error {
 	sub, err := oneArg(args, "install | uninstall | restart | status")
 	if err != nil {
 		return err
 	}
 	switch sub {
 	case "install":
-		exe, err := os.Executable()
+		exe, err := thisBinary()
 		if err != nil {
 			return err
 		}
-		if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		dir, err := store.DefaultDir()
+		if err != nil {
 			return err
 		}
-		p, err := service.Install(exe, filepath.Join(n.Store.Dir, "daemon.log"))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		p, err := service.Install(exe, filepath.Join(dir, "daemon.log"))
 		if err != nil {
 			return err
 		}
@@ -1223,6 +1291,12 @@ func cmdService(n *proto.Node, args []string) error {
 			return err
 		}
 		fmt.Println(st)
+		if bin, ok := service.Binary(); ok {
+			fmt.Println("runs:", bin)
+			if exe, err := thisBinary(); err == nil && serviceElsewhere(exe) != "" {
+				fmt.Printf("that is not this np (%s): `np upgrade` does not reach it. Run `np service install` to use this one.\n", exe)
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown service command %q", sub)
@@ -1280,29 +1354,42 @@ func cmdUpgrade(args []string) error {
 	check := len(args) == 1 && args[0] == "--check"
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	upgrade.UserAgent = "np/" + Version
+	exe, err := thisBinary()
+	if err != nil {
+		return err
+	}
+	// The service may run another copy of np, which upgrading this one
+	// does not touch. Say so whatever else happens.
+	elsewhere := serviceElsewhere(exe)
+	warn := func() {
+		if elsewhere != "" {
+			fmt.Fprintf(os.Stderr, "np: the background service runs %s, not this np (%s), so it was not upgraded.\n    Run `np service install` to make the service use this one.\n", elsewhere, exe)
+		}
+	}
 	rel, err := upgrade.Latest(ctx)
 	if err != nil {
+		warn()
 		return err
 	}
 	fmt.Printf("current %s, latest %s\n", Version, rel.Tag)
 	if strings.TrimPrefix(rel.Tag, "v") == strings.TrimPrefix(Version, "v") {
 		fmt.Println("already up to date")
+		warn()
 		return nil
 	}
 	if check {
+		warn()
 		return nil
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if exe, err = filepath.EvalSymlinks(exe); err != nil {
-		return err
 	}
 	if err := upgrade.Install(ctx, rel, exe); err != nil {
 		return err
 	}
 	fmt.Printf("installed %s to %s\n", rel.Tag, exe)
+	if elsewhere != "" {
+		warn()
+		return nil
+	}
 	restarted, err := service.Restart()
 	if err != nil {
 		return fmt.Errorf("binary upgraded but service restart failed: %w", err)

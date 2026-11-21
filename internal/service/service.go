@@ -82,6 +82,78 @@ func Status() (string, error) {
 	}
 }
 
+// Binary returns the program the installed service starts, and whether a
+// service is installed at all. The command line can be upgraded while the
+// service keeps running an older copy somewhere else; callers compare this
+// with their own path to notice.
+func Binary() (string, bool) {
+	var p string
+	var parse func(string) string
+	switch runtime.GOOS {
+	case "linux":
+		p, parse = systemdPath(), unitBinary
+	case "darwin":
+		p, parse = launchdPath(), plistBinary
+	default:
+		return "", false
+	}
+	def, err := os.ReadFile(p)
+	if err != nil {
+		return "", false
+	}
+	return parse(string(def)), true
+}
+
+// unitBinary extracts the program from a systemd unit's ExecStart line.
+func unitBinary(unit string) string {
+	for _, line := range strings.Split(unit, "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "ExecStart="); ok {
+			v = strings.TrimSpace(strings.TrimLeft(v, "-@+!:"))
+			if strings.HasPrefix(v, `"`) {
+				if end := strings.Index(v[1:], `"`); end >= 0 {
+					return v[1 : 1+end]
+				}
+			}
+			// Paths may hold spaces; np writes "<path> daemon".
+			if rest, ok := strings.CutSuffix(v, " daemon"); ok {
+				return rest
+			}
+			if f := strings.Fields(v); len(f) > 0 {
+				return f[0]
+			}
+		}
+	}
+	return ""
+}
+
+// plistBinary extracts the first ProgramArguments string of a launchd plist.
+func plistBinary(plist string) string {
+	i := strings.Index(plist, "<key>ProgramArguments</key>")
+	if i < 0 {
+		return ""
+	}
+	rest := plist[i:]
+	a := strings.Index(rest, "<string>")
+	b := strings.Index(rest, "</string>")
+	if a < 0 || b < a {
+		return ""
+	}
+	r := strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`, "&apos;", "'")
+	return r.Replace(rest[a+len("<string>") : b])
+}
+
+// SameFile reports whether two paths name the same file once links are followed.
+func SameFile(a, b string) bool {
+	if ra, err := filepath.EvalSymlinks(a); err == nil {
+		a = ra
+	}
+	if rb, err := filepath.EvalSymlinks(b); err == nil {
+		b = rb
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
 func run(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err != nil {
@@ -125,6 +197,10 @@ WantedBy=default.target
 		return "", err
 	}
 	if err := run("systemctl", "--user", "enable", "--now", systemdName); err != nil {
+		return "", err
+	}
+	// A unit that was already running keeps its old command line until restarted.
+	if err := run("systemctl", "--user", "restart", systemdName); err != nil {
 		return "", err
 	}
 	return p, nil

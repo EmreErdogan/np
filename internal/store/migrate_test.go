@@ -297,3 +297,24 @@ func TestOpenRefusesNewerLayout(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestNeedsMigration(t *testing.T) {
+	l := buildLegacy(t)
+	raw, _ := json.Marshal(map[string]any{"node": "desk", "notes": l.Notes, "files": l.Files})
+	l.write("index.json", string(raw))
+	if !NeedsMigration(l.dir) {
+		t.Fatal("a layout 1 store needs migration")
+	}
+	if _, err := Open(l.dir, "desk"); err != nil {
+		t.Fatal(err)
+	}
+	if NeedsMigration(l.dir) {
+		t.Fatal("already migrated")
+	}
+	if NeedsMigration(t.TempDir()) {
+		t.Fatal("an empty directory has nothing to migrate")
+	}
+	if c, err := ReadConfig(t.TempDir()); err != nil || c.Port != DefaultPort {
+		t.Fatalf("config=%+v err=%v", c, err)
+	}
+}

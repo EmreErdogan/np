@@ -23,7 +23,14 @@ curl -fsSL https://raw.githubusercontent.com/EmreErdogan/np/main/install.sh | sh
 It downloads the latest release for your OS and CPU, verifies the checksum,
 puts `np` in `~/.local/bin` (override with `NP_INSTALL_DIR`) and adds that
 directory to your shell's PATH if needed. Later, `np upgrade` fetches the
-newest release in place and restarts the service if one is installed.
+newest release in place and restarts the service if one is installed. Like
+the installer it reads the release page, not the GitHub API, so it needs no
+token and is not subject to the API's hourly quota.
+
+The service starts the np it was installed from. If that is another copy
+than the one on your PATH, upgrading does not reach it: `np upgrade` and
+`np service status` say so, and `np service install` points the service at
+the np you are running.
 
 Alternatives: grab a binary from the
 [releases page](https://github.com/EmreErdogan/np/releases), or
@@ -125,7 +132,9 @@ file would get the same name, the file keeps it and the note becomes
 file had no history; it gets a snapshot of its current content on that
 first run and keeps every version from then on. The sync protocol changed
 with the layout: machines sync again once all of them are upgraded, so
-sync first, then run `np upgrade` everywhere.
+sync first, then run `np upgrade` everywhere. np will not convert the store
+while a daemon of an older version is still running on the machine; it
+tells you to run `np service install` (or to stop that daemon) first.
 
 ## Web UI
 
